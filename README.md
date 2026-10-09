@@ -108,7 +108,12 @@ echo status | nc -U /var/run/droidtetherd.sock
 make            # daemon only: build/droidtetherd
 make test       # packet tests, no device needed (uses tcpdump to double-check checksums if present)
 make app        # build/DroidTether.app
+python3 tests/dns_logic_test.py --quick   # live DNS/routing invariants with the phone connected, no disruption
+python3 tests/dns_logic_test.py           # plus reconnect, pause, DNS and primary switches, configd losing
+                                          # our entries, and a daemon crash (the connection drops briefly)
 ```
+
+The live test also reproduces the DNS-only write that broke the tools this project replaces, and checks that `configd` ignores it while DroidTether's entry is the one in use.
 
 To run the daemon by hand, first turn DroidTether off under Login Items so the installed copy releases the phone (only one instance can run). Then:
 

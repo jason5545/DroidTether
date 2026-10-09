@@ -481,6 +481,7 @@ static void run_session(usbdev_t *u, const dt_config *opt) {
     uint32_t renew_xid = 0;
     time_t last_req = 0;
     time_t last_stats = start;
+    time_t last_check = start;
     unsigned long prev[4] = {0};
     while (!stopping() && !s->dead) {
         time_t now = mono_now();
@@ -491,6 +492,14 @@ static void run_session(usbdev_t *u, const dt_config *opt) {
                  (unsigned long)s->inject_errs);
             memcpy(prev, cur, sizeof prev);
             last_stats = now;
+        }
+        // configd 重啟或有人刪掉我們的鍵時，DNS 會悄悄回到 Wi-Fi（原版的毛病）。每 5 秒確認一次，不見就補回。
+        if (now - last_check >= 5) {
+            last_check = now;
+            if (!netcfg_present()) {
+                LOGW("network service entry disappeared from configd, registering it again");
+                if (netcfg_republish() == 0 && opt->primary) ensure_default_route(s->net.host, s->gw);
+            }
         }
         if (now >= expire_at) {
             LOGW("DHCP lease expired");
@@ -528,7 +537,7 @@ static void run_session(usbdev_t *u, const dt_config *opt) {
         renew_at = start + (r.t1 ? r.t1 : lease_s / 2);
         expire_at = start + lease_s;
         renew_xid = 0;
-        LOGD("DHCP lease renewed (%us)", lease_s);
+        LOGI("DHCP lease renewed (%us)", lease_s);
     }
 
 out:

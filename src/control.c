@@ -19,6 +19,9 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <arpa/inet.h>
+
+#include "netcfg.h"
 #include "state.h"
 
 static const char *g_config_path;
@@ -105,6 +108,27 @@ static void handle(char *line, sbuf *out) {
         LOGI("control: quit");
         g_stop = true;
         sb_add(out, "{\"ok\":true}");
+        return;
+    }
+    // 測試用，見 tests/dns_logic_test.py
+    if (strcmp(cmd, "debug") == 0 && key) {
+        if (strcmp(key, "legacy-dns") == 0 && val) {
+            struct in_addr a;
+            bool ok = inet_pton(AF_INET, val, &a) == 1 && netcfg_debug_legacy_dns(a.s_addr) == 0;
+            sb_add(out, "{\"ok\":%s}", ok ? "true" : "false");
+        } else if (strcmp(key, "legacy-dns-clear") == 0) {
+            netcfg_debug_legacy_dns_clear();
+            sb_add(out, "{\"ok\":true}");
+        } else if (strcmp(key, "drop-netcfg") == 0) {
+            LOGW("control: debug drop-netcfg");
+            netcfg_debug_drop();
+            sb_add(out, "{\"ok\":true}");
+        } else if (strcmp(key, "abort") == 0) {
+            LOGW("control: debug abort (simulated crash)");
+            abort();
+        } else {
+            sb_add(out, "{\"ok\":false,\"error\":\"unknown_debug_command\"}");
+        }
         return;
     }
     if (strcmp(cmd, "set") == 0 && key && val) {
