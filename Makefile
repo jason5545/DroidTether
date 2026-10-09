@@ -62,13 +62,13 @@ $(APP): $(DAEMON) $(SWIFT) app/Info.plist app/$(LABEL).plist app/Resources/*/* b
 	mkdir -p $@/Contents/MacOS $@/Contents/Resources $@/Contents/Library/LaunchDaemons
 	swiftc -O -swift-version 5 -target arm64-apple-macos26.0 -parse-as-library $(SWIFT) -o $@/Contents/MacOS/DroidTether
 	cp $(DAEMON) $@/Contents/MacOS/droidtetherd
-	sed -e 's/__VERSION__/$(VERSION)/' -e 's/__BUILD__/$(BUILD)/' app/Info.plist > $@/Contents/Info.plist
+	sed -e 's/$$(MARKETING_VERSION)/$(VERSION)/' -e 's/$$(CURRENT_PROJECT_VERSION)/$(BUILD)/' app/Info.plist > $@/Contents/Info.plist
 	cp app/$(LABEL).plist $@/Contents/Library/LaunchDaemons/
 	cp -R app/Resources/*.lproj $@/Contents/Resources/
 	cp build/AppIcon.icns $@/Contents/Resources/
 	mkdir -p $@/Contents/Resources/Licenses
 	cp LICENSE THIRD-PARTY-NOTICES.md $@/Contents/Resources/Licenses/
-	cp $(BREW)/opt/libusb/COPYING $@/Contents/Resources/Licenses/libusb-COPYING.txt
+	cp third_party/libusb-COPYING.txt $@/Contents/Resources/Licenses/
 	codesign --force --options runtime --timestamp=none --identifier $(LABEL)d --sign "$(SIGN_ID)" $@/Contents/MacOS/droidtetherd
 	codesign --force --options runtime --timestamp=none --sign "$(SIGN_ID)" $@
 	codesign --verify --deep --strict $@
@@ -82,9 +82,14 @@ install: $(APP)
 # 發布用：DMG（拖進「應用程式」）、ZIP、SHA-256
 DIST := build/dist
 
-dist: $(APP)
+# APP_SRC 預設是 make app 的產物；發版時 scripts/release.sh 會傳入公證過的 App
+APP_SRC ?= $(APP)
+
+dist: $(APP) package
+
+package:
 	rm -rf $(DIST) && mkdir -p $(DIST)/stage
-	ditto $(APP) $(DIST)/stage/DroidTether.app
+	ditto "$(APP_SRC)" $(DIST)/stage/DroidTether.app
 	ln -s /Applications $(DIST)/stage/Applications
 	cp LICENSE THIRD-PARTY-NOTICES.md $(DIST)/stage/
 	hdiutil create -quiet -volname "DroidTether $(VERSION)" -srcfolder $(DIST)/stage -ov -format UDZO $(DIST)/DroidTether-$(VERSION).dmg
@@ -96,4 +101,4 @@ dist: $(APP)
 clean:
 	rm -rf build
 
-.PHONY: all app install clean test dist
+.PHONY: all app install clean test dist package

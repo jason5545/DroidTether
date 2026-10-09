@@ -1,0 +1,90 @@
+# xcodegen 設定。只用在發版（Developer ID 簽章與公證，見 scripts/release.sh）；平常開發用 Makefile。
+name: DroidTether
+options:
+  bundleIdPrefix: io.github.jason5545
+  developmentLanguage: en
+  deploymentTarget:
+    macOS: "26.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: MW4GWYGX56
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: 0.0.0
+    CURRENT_PROJECT_VERSION: 1
+    ARCHS: arm64
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+targets:
+  droidtetherd:
+    type: tool
+    platform: macOS
+    sources:
+      - path: src
+    settings:
+      base:
+        PRODUCT_NAME: droidtetherd
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.jason5545.droidtetherd
+        SKIP_INSTALL: YES
+        GCC_C_LANGUAGE_STANDARD: c11
+        HEADER_SEARCH_PATHS: /opt/homebrew/include/libusb-1.0
+        # libusb 靜態連結：root 常駐程式不該去載入 Homebrew 底下使用者可寫的 dylib
+        OTHER_LDFLAGS: /opt/homebrew/lib/libusb-1.0.a -lobjc
+        GCC_PREPROCESSOR_DEFINITIONS: 'DT_VERSION=\"$(MARKETING_VERSION)\"'
+        OTHER_CODE_SIGN_FLAGS: --identifier io.github.jason5545.droidtetherd
+    dependencies:
+      - sdk: IOKit.framework
+      - sdk: CoreFoundation.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: Security.framework
+  DroidTether:
+    type: application
+    platform: macOS
+    sources:
+      - path: app/Sources
+      - path: app/Resources
+      - path: app/io.github.jason5545.droidtether.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchDaemons
+      - path: LICENSE
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: Licenses
+      - path: THIRD-PARTY-NOTICES.md
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: Licenses
+      - path: third_party/libusb-COPYING.txt
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: Licenses
+    dependencies:
+      - target: droidtetherd
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+    postCompileScripts:
+      - name: Copy app icon
+        # 圖示由 Makefile 從 assets/logo.svg 產生（make build/AppIcon.icns），這裡只負責放進 bundle
+        script: |
+          set -e
+          mkdir -p "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
+          cp "$SRCROOT/build/AppIcon.icns" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/AppIcon.icns"
+        inputFiles:
+          - $(SRCROOT)/build/AppIcon.icns
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AppIcon.icns
+    settings:
+      base:
+        PRODUCT_NAME: DroidTether
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.jason5545.DroidTether
+        INFOPLIST_FILE: app/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_ENTITLEMENTS: ""
