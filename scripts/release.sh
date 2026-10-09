@@ -52,3 +52,12 @@ xcrun stapler validate "$APP"
 spctl -a -vv -t exec "$APP"
 
 make package APP_SRC="$APP" VERSION="$VERSION"
+
+# 清掉建置過程留下的 App 副本，並從 LaunchServices 取消登記。
+# 同一個 bundle ID 在系統裡登記好幾份時，背景服務的程式路徑可能被解析到錯的副本。
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+find "$PWD/build" -name "DroidTether.app" -type d -prune 2>/dev/null | while read -r app; do
+    "$LSREGISTER" -u "$app" 2>/dev/null || true
+done
+rm -rf build/xcode "$ARCHIVE" "$OUT/notarized" "$OUT/upload"
+echo "==> done: build/dist/DroidTether-$VERSION.dmg"

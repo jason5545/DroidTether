@@ -66,6 +66,10 @@ DroidTether.app (menu bar) ⇄ /var/run/droidtetherd.sock ⇄ droidtetherd
 - An Android phone that tethers over RNDIS (USB interface class `EF/04/01`, `E0/01/03` or `02/02/FF`). Tested with a POCO F8 Ultra on HyperOS.
 - To build: the Xcode command line tools (Swift 6), `libusb` from Homebrew, and an Apple Development code-signing identity. I have only tested the `SMAppService` background service with a properly signed app.
 
+## Download
+
+Signed with Developer ID and notarized by Apple: get the DMG from the [latest release](https://github.com/jason5545/DroidTether/releases/latest), drag DroidTether into Applications and open it. Then allow the background item as described below.
+
 ## Build and install
 
 ```bash
@@ -95,6 +99,7 @@ On first launch, macOS asks you to allow the background item. Turn on **DroidTet
 | "… is in use by another app" | Quit any other tethering tool that might hold the device. |
 | Connected, but names don't resolve | `scutil --dns` should list the phone's DNS as the default resolver, and `printf 'show State:/Network/Global/IPv4\n' \| scutil` should show `PrimaryService : DroidTether`. |
 | Ping works, websites hang | Some carriers drop large packets. Try a smaller MTU with the development build below (`--mtu 1380`). |
+| Background service never starts after switching between a self-built copy and a downloaded one | `launchctl print system/io.github.jason5545.droidtether` shows `spawn failed` and `needs LWCR update`. launchd still holds the code requirement of the first copy that registered the service. Restarting the Mac clears it. Avoid keeping several copies of DroidTether.app around: macOS may resolve the bundled daemon from the wrong one. |
 
 The daemon logs to `/Library/Logs/DroidTether.log`. To query it from a terminal:
 
@@ -196,7 +201,9 @@ DroidTether 的做法：
 
 ### 安裝
 
-需要 macOS 26 以上、Apple Silicon、Homebrew 的 `libusb`，以及 Apple Development 簽章憑證。
+直接下載：到 [最新 release](https://github.com/jason5545/DroidTether/releases/latest) 下載 DMG（已用 Developer ID 簽章並通過 Apple 公證），把 DroidTether 拖進「應用程式」再打開。
+
+自己編譯：需要 macOS 26 以上、Apple Silicon、Homebrew 的 `libusb`，以及 Apple Development 簽章憑證。
 
 ```bash
 brew install libusb
