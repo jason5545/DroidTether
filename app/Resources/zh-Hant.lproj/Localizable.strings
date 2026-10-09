@@ -1,0 +1,53 @@
+/* 面板 */
+"Reconnect" = "重新連線";
+"Settings…" = "設定…";
+"Pause" = "暫停";
+"Resume" = "恢復";
+"Quit" = "結束";
+"Allow DroidTether in System Settings to start the background service." = "請到系統設定允許 DroidTether，背景服務才會啟動。";
+"Open System Settings" = "打開系統設定";
+"The background service could not be installed." = "背景服務安裝失敗。";
+"Retry" = "重試";
+"Download" = "下載";
+"Upload" = "上傳";
+"Last 2 minutes" = "最近 2 分鐘";
+"Traffic in the last 2 minutes" = "最近 2 分鐘的流量";
+"Ping" = "Ping";
+"Phone" = "手機";
+"Internet" = "網路";
+"Phone: latency over the USB cable. Internet: latency to 1.1.1.1 through the phone." = "手機：USB 線路的延遲。網路：經由手機連到 1.1.1.1 的延遲。";
+"Open Log" = "打開記錄檔";
+
+/* 狀態 */
+"Connected to %@" = "已連線：%@";
+"Not used as the main connection" = "未設為主要連線";
+"Connecting to %@…" = "正在連線：%@…";
+"%@ is connected" = "已接上 %@";
+"Turn on USB tethering on the phone" = "請在手機上開啟 USB 網路共用";
+"%@ is in use by another app" = "%@ 正被其他 App 使用";
+"Quit other tethering apps (e.g. MacTethering)" = "請先結束其他網路分享 App（例如 MacTethering）";
+"Waiting for an Android phone" = "等待 Android 手機接上";
+"USB tethering paused" = "USB 網路分享已暫停";
+"Background service not running" = "背景服務沒有執行";
+
+/* 錯誤 */
+"The phone did not assign an address; check that USB tethering is on" = "手機沒有配發位址，請確認 USB 網路共用已開啟";
+"Could not talk to the phone over USB" = "無法透過 USB 與手機溝通";
+"Could not create the network interface" = "無法建立網路介面";
+"Could not apply network settings" = "無法套用網路設定";
+
+/* 設定 */
+"DroidTether Settings" = "DroidTether 設定";
+"Open DroidTether at login" = "登入時開啟 DroidTether";
+"Use as the main connection" = "設為主要連線";
+"All traffic and DNS go through the phone. Turn off to keep Wi-Fi as the main connection." = "所有流量和 DNS 都走手機。關掉的話，Wi-Fi 仍是主要連線。";
+"DNS" = "DNS";
+"Provided by the phone" = "使用手機提供的";
+"Custom" = "自訂";
+"Apply" = "套用";
+"Enter up to four IPv4 addresses separated by commas." = "請輸入最多四個 IPv4 位址，用逗號分隔。";
+"Network" = "網路";
+"Changing these settings reconnects USB tethering for a moment." = "變更這些設定時，USB 網路分享會短暫重新連線。";
+"App" = "App";
+"Background service" = "背景服務";
+"About" = "關於";

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.jason5545.droidtether</string>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/droidtetherd</string>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>io.github.jason5545.DroidTether</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>StandardErrorPath</key>
+    <string>/Library/Logs/DroidTether.log</string>
+</dict>
+</plist>
