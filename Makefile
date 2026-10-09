@@ -57,7 +57,7 @@ build/AppIcon.icns: assets/logo.svg build/svg2png
 
 app: $(APP)
 
-$(APP): $(DAEMON) $(SWIFT) app/Info.plist app/$(LABEL).plist app/Resources/*/* build/AppIcon.icns
+$(APP): $(DAEMON) $(SWIFT) app/Info.plist app/$(LABEL).plist app/Resources/*/* build/AppIcon.icns LICENSE THIRD-PARTY-NOTICES.md
 	rm -rf $@
 	mkdir -p $@/Contents/MacOS $@/Contents/Resources $@/Contents/Library/LaunchDaemons
 	swiftc -O -swift-version 5 -target arm64-apple-macos26.0 -parse-as-library $(SWIFT) -o $@/Contents/MacOS/DroidTether
@@ -66,6 +66,9 @@ $(APP): $(DAEMON) $(SWIFT) app/Info.plist app/$(LABEL).plist app/Resources/*/* b
 	cp app/$(LABEL).plist $@/Contents/Library/LaunchDaemons/
 	cp -R app/Resources/*.lproj $@/Contents/Resources/
 	cp build/AppIcon.icns $@/Contents/Resources/
+	mkdir -p $@/Contents/Resources/Licenses
+	cp LICENSE THIRD-PARTY-NOTICES.md $@/Contents/Resources/Licenses/
+	cp $(BREW)/opt/libusb/COPYING $@/Contents/Resources/Licenses/libusb-COPYING.txt
 	codesign --force --options runtime --timestamp=none --identifier $(LABEL)d --sign "$(SIGN_ID)" $@/Contents/MacOS/droidtetherd
 	codesign --force --options runtime --timestamp=none --sign "$(SIGN_ID)" $@
 	codesign --verify --deep --strict $@
@@ -76,7 +79,21 @@ install: $(APP)
 	rm -rf /Applications/DroidTether.app
 	ditto $(APP) /Applications/DroidTether.app
 
+# 發布用：DMG（拖進「應用程式」）、ZIP、SHA-256
+DIST := build/dist
+
+dist: $(APP)
+	rm -rf $(DIST) && mkdir -p $(DIST)/stage
+	ditto $(APP) $(DIST)/stage/DroidTether.app
+	ln -s /Applications $(DIST)/stage/Applications
+	cp LICENSE THIRD-PARTY-NOTICES.md $(DIST)/stage/
+	hdiutil create -quiet -volname "DroidTether $(VERSION)" -srcfolder $(DIST)/stage -ov -format UDZO $(DIST)/DroidTether-$(VERSION).dmg
+	cd $(DIST) && ditto -c -k --keepParent stage/DroidTether.app DroidTether-$(VERSION).zip
+	cd $(DIST) && shasum -a 256 DroidTether-$(VERSION).dmg DroidTether-$(VERSION).zip > SHA256SUMS.txt
+	rm -rf $(DIST)/stage
+	cat $(DIST)/SHA256SUMS.txt
+
 clean:
 	rm -rf build
 
-.PHONY: all app install clean test
+.PHONY: all app install clean test dist
