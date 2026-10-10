@@ -174,6 +174,7 @@ final class TetherModel: ObservableObject {
 
     func setEnabled(_ on: Bool) { send("set enabled \(on ? 1 : 0)") }
     func setPrimary(_ on: Bool) { send("set primary \(on ? 1 : 0)") }
+    func setWifiOff(_ on: Bool) { send("set wifi_off \(on ? 1 : 0)") }
     func reconnect() { send("reconnect") }
     func useCustomDNS(_ servers: [String]) { send("set dns " + servers.joined(separator: ",")) }
     func usePhoneDNS() { send("set dns phone") }

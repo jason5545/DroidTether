@@ -22,6 +22,7 @@ typedef struct {
     bool enabled;
     bool primary;
     bool dns_from_phone;
+    bool wifi_off;  // 連線時關掉 Wi-Fi，手機不在了再打開
     uint32_t dns[4];
     int ndns;
     int mtu;  // 只能從命令列指定，0 表示自動
@@ -35,6 +36,7 @@ typedef struct {
     uint32_t ip, gw, mask;
     uint32_t dns[4];
     int ndns;
+    bool dns_fallback;  // 手機沒回 DNS，暫時用備用 DNS
     time_t since;
 } dt_status;
 
@@ -42,6 +44,7 @@ extern pthread_mutex_t g_state_lock;
 extern dt_config g_cfg;
 extern dt_status g_st;
 extern atomic_ulong g_rx_bytes, g_tx_bytes;
+extern atomic_bool g_dns_probe_fail;  // 測試用：當作手機不回 DNS
 
 void config_load(const char *path);
 int config_save(const char *path);

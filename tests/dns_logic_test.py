@@ -10,11 +10,18 @@ DNS-only tethering tools cannot happen here. Needs the installed daemon
 
 Invariants checked after every scenario:
   1. configd's primary service is DroidTether (when "main connection" is on)
-  2. the default resolver is exactly the DNS list the daemon reports
+  2. the default resolver is exactly the DNS list the daemon reports; if a domain-less resolver
+     with a lower order sits in front of it (Tailscale with "Use Tailscale DNS" on), the check
+     names it, since mDNSResponder then sends ordinary names there first
   3. the route to each DNS server goes out the tether interface
-  4. an uncached lookup (random name on a wildcard DNS service) resolves
-  5. HTTPS works and leaves from the tether address
-  6. Tailscale stays online and MagicDNS resolves (if Tailscale was online at start)
+  4. each of those DNS servers answers an uncached name when asked directly with dig
+     (bypasses mDNSResponder and Tailscale, so this is the check that the phone answers DNS)
+  5. an uncached lookup (random name on a wildcard DNS service) resolves through the system
+  6. HTTPS works and leaves from the tether address
+  7. Tailscale stays online and MagicDNS resolves (if Tailscale was online at start)
+
+The full run also covers "turn off Wi-Fi while connected" when Wi-Fi is on at the start
+(Wi-Fi is switched off and on a few times).
 """
 
 import concurrent.futures
@@ -29,6 +36,7 @@ import uuid
 
 SOCK = "/var/run/droidtetherd.sock"
 TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+NETWORKSETUP = "/usr/sbin/networksetup"
 
 passed = failed = 0
 
@@ -81,19 +89,60 @@ def droidtether_keys():
     return re.findall(r"= (State:\S+)", out)
 
 
-def default_resolver():
-    """Nameservers mDNSResponder uses for ordinary names: first resolver with no domain that isn't supplemental."""
+def resolvers():
+    """Unscoped resolvers from `scutil --dns`, in listed order."""
     main = run("/usr/sbin/scutil", "--dns").split("DNS configuration (for scoped queries)")[0]
+    out = []
     for block in re.split(r"\nresolver #\d+\n", main)[1:]:
-        if re.search(r"^\s*domain\s*:", block, re.M):
-            continue
         flags = re.search(r"flags\s*:\s*(.*)", block)
-        if flags and "Supplemental" in flags.group(1):
+        order = re.search(r"order\s*:\s*(\d+)", block)
+        iface = re.search(r"if_index\s*:\s*\d+\s*\((\S+)\)", block)
+        out.append({
+            "domain": bool(re.search(r"^\s*domain\s*:", block, re.M)),
+            "supplemental": bool(flags and "Supplemental" in flags.group(1)),
+            "order": int(order.group(1)) if order else None,
+            "iface": iface.group(1) if iface else None,
+            "ns": re.findall(r"nameserver\[\d+\]\s*:\s*(\S+)", block),
+        })
+    return out
+
+
+def system_resolver(rs):
+    """The resolver configd builds from the primary service: first one with no domain that isn't supplemental."""
+    return next((r for r in rs if not r["domain"] and not r["supplemental"] and r["ns"]), None)
+
+
+def default_resolver():
+    r = system_resolver(resolvers())
+    return r["ns"] if r else []
+
+
+def resolvers_in_front():
+    """Domain-less resolvers with a lower order than the system one. mDNSResponder sends ordinary names to them
+    first even though scutil flags them Supplemental: Tailscale's 100.100.100.100 with "Use Tailscale DNS" on
+    and tailnet global nameservers (mDNSResponder logs it with domain "." at order 100200, ours at 200000)."""
+    rs = resolvers()
+    ours = system_resolver(rs)
+    if not ours or ours["order"] is None:
+        return []
+    names = []
+    for r in rs:
+        if r is ours or r["domain"] or not r["ns"] or r["order"] is None or r["order"] >= ours["order"]:
             continue
-        ns = re.findall(r"nameserver\[\d+\]\s*:\s*(\S+)", block)
-        if ns:
-            return ns
-    return []
+        who = "Tailscale" if "100.100.100.100" in r["ns"] else (r["iface"] or "another resolver")
+        names.append(f"{who} {r['ns'][0]}")
+    return names
+
+
+def check_default_resolver(label, dns):
+    """Invariant 2. Strict when nothing sits in front of our resolver. When something does, say what, so a pass
+    never claims ordinary names go to the daemon's DNS while mDNSResponder actually asks Tailscale first."""
+    dr, front = default_resolver(), resolvers_in_front()
+    if front:
+        name = f"DNS goes through {', '.join(front)} first, not daemon DNS; the system resolver behind it = daemon DNS"
+    else:
+        name = "default resolver = daemon DNS"
+    return check(f"{label}: {name}", dr == dns, f"resolver {dr}, daemon {dns}")
 
 
 def all_resolver_text():
@@ -128,8 +177,37 @@ def uncached_lookup():
     return False, "no answer from sslip.io or nip.io"
 
 
+def direct_lookup(server):
+    """Same random wildcard name, asked straight at one server with dig: bypasses mDNSResponder (and Tailscale
+    in front of it), so a pass means that server itself answered over the tether."""
+    errors = []
+    for svc in ("sslip.io", "nip.io"):
+        n = random.randint(1, 254)
+        name = f"dt-{uuid.uuid4().hex[:12]}.192-0-2-{n}.{svc}"
+        t = time.time()
+        out = run("/usr/bin/dig", f"@{server}", name, "A", "+time=3", "+tries=1")
+        ms = int((time.time() - t) * 1000)
+        answers = re.findall(r"\sIN\s+A\s+(\d+\.\d+\.\d+\.\d+)", out)
+        if f"192.0.2.{n}" in answers:
+            return True, f"{svc} {ms} ms"
+        if "timed out" in out or "no servers could be reached" in out:
+            errors.append(f"{svc}: no reply in 3 s")
+        else:
+            m = re.search(r"status: (\w+)", out)
+            errors.append(f"{svc}: {m.group(1) if m else 'no response'}, answer {answers or 'empty'}")
+    return False, "; ".join(errors)
+
+
 def wifi_up():
     return bool(run("/usr/sbin/ipconfig", "getifaddr", "en0").strip())
+
+
+def wifi_power():
+    return run(NETWORKSETUP, "-getairportpower", "en0").strip().rsplit(" ", 1)[-1]
+
+
+def set_wifi_power(on):
+    run(NETWORKSETUP, "-setairportpower", "en0", "on" if on else "off")
 
 
 def https(interface=None):
@@ -185,11 +263,14 @@ def invariants(label):
     if primary:
         ps = primary_service()
         check(f"{label}: primary service is DroidTether", ps == "DroidTether", f"got {ps}")
-        dr = default_resolver()
-        check(f"{label}: default resolver = daemon DNS", dr == dns, f"resolver {dr}, daemon {dns}")
+        check_default_resolver(label, dns)
+    who = "the phone" if st["config"]["dns_mode"] == "phone" else "the custom DNS server"
     for d in dns:
         ri = route_iface(d)
         check(f"{label}: route to DNS {d} via {iface}", ri == iface, f"got {ri}")
+        ok, detail = direct_lookup(d)
+        check(f"{label}: DNS {d} answers when asked directly (dig, no mDNSResponder/Tailscale)", ok,
+              detail if ok else f"{who} ({d}) did not answer DNS over the tether: {detail}")
     ok, detail = uncached_lookup()
     check(f"{label}: uncached lookup resolves", ok, detail)
     code, local = https(None if primary else iface)
@@ -230,8 +311,7 @@ def main():
     time.sleep(2)
     text = all_resolver_text()
     check("configd ignores a DNS entry without IPv4 (9.9.9.9 never reaches the resolver)", "9.9.9.9" not in text)
-    check("our IPv4+DNS entry is the default resolver", default_resolver() == status()["dns"],
-          f"{default_resolver()}")
+    check_default_resolver("our IPv4+DNS entry still in use", status()["dns"])
     daemon("debug legacy-dns-clear")
 
     if quick:
@@ -265,6 +345,9 @@ def main():
         check("phone DNS applied", wait_connected() is not None)
         invariants("phone DNS")
 
+        if "dns_fallback" in (status() or {}):
+            dns_fallback_scenario()
+
         scenario("not the main connection")
         daemon("set primary 0")
         s = wait_connected()
@@ -277,12 +360,14 @@ def main():
             # 沒有別的網路時，不搶主要連線也一樣要能用：系統自己會選手機，DNS 也要跟著過去
             s = wait_until(lambda: primary_service() == "DroidTether" and status(), 15)
             check("no Wi-Fi: macOS still picks the tether on its own", bool(s), f"got {primary_service()}")
-            check("no Wi-Fi: default resolver = daemon DNS", bool(s) and default_resolver() == s["dns"],
-                  f"{default_resolver()}")
+            check_default_resolver("no Wi-Fi", s["dns"] if s else None)
         invariants("secondary")
         daemon("set primary 1")
         check("main connection again", wait_connected() is not None)
         invariants("primary again")
+
+        if "wifi_off" in original and wifi_power() == "On":
+            wifi_scenario()
 
         scenario("configd loses our entries (e.g. configd restart)")
         pid = run("/usr/bin/pgrep", "-x", "droidtetherd").split()
@@ -314,6 +399,10 @@ def main():
         invariants("after crash")
     finally:
         cfg = status()
+        if cfg and "wifi_off" in original and cfg["config"].get("wifi_off") != original["wifi_off"]:
+            daemon(f"set wifi_off {1 if original['wifi_off'] else 0}")
+        if "wifi_off" in original and wifi_power() != "On":
+            set_wifi_power(True)
         if cfg:
             if not original["enabled"]:
                 daemon("set enabled 0")
@@ -325,6 +414,112 @@ def main():
                 daemon(f"set primary {1 if original['primary'] else 0}")
 
     return summary()
+
+
+def unused_tether_address(st):
+    """An address on the tether subnet that neither the Mac nor the phone uses: nothing will answer there."""
+    ip = [int(x) for x in st["ip"].split(".")]
+    mask = [int(x) for x in st["netmask"].split(".")]
+    net = [a & m for a, m in zip(ip, mask)]
+    for host in range(1, 255):
+        cand = ".".join(map(str, net[:3] + [net[3] + host]))
+        if cand not in (st["ip"], st["gateway"]):
+            return cand
+    return None
+
+
+def dns_fallback_scenario():
+    scenario("phone does not answer DNS (simulated)")
+    st = status()
+    phone = st["dns"]
+    r = daemon(f"debug dns-probe {phone[0]}") or {}
+    check(f"probe: the phone answers DNS at {phone[0]}", r.get("answered") is True, str(r))
+    unused = unused_tether_address(st)
+    r = daemon(f"debug dns-probe {unused}", timeout=6) or {}
+    check(f"probe: nothing answers at {unused}", r.get("answered") is False, str(r))
+
+    daemon("debug dns-probe-fail 1")
+    since = None
+    try:
+        daemon("reconnect")
+        s = wait_connected()
+        check("reconnected", s is not None)
+        check("falls back to 8.8.8.8, 8.8.4.4", bool(s) and s.get("dns") == ["8.8.8.8", "8.8.4.4"]
+              and s.get("dns_fallback") is True, str(s and (s.get("dns"), s.get("dns_fallback"))))
+        invariants("fallback DNS")
+        since = (status() or {}).get("since")
+    finally:
+        daemon("debug dns-probe-fail 0")
+    t0 = time.time()
+    back = wait_until(lambda: (lambda x: bool(x) and x.get("dns") == phone and x.get("dns_fallback") is False)(status()),
+                      75, 1)
+    check("switches back to the phone's DNS once it answers", bool(back),
+          f"{time.time() - t0:.0f} s, dns {(status() or {}).get('dns')}")
+    check("without reconnecting", (status() or {}).get("since") == since)
+    time.sleep(1.5)
+    invariants("phone DNS again")
+
+
+def pause_and_wait():
+    daemon("set enabled 0")
+    return bool(wait_until(lambda: (status() or {}).get("state") == "disabled", 10))
+
+
+def wifi_scenario():
+    def power_is(v, timeout=10):
+        return bool(wait_until(lambda: wifi_power() == v, timeout, 0.3))
+
+    scenario("turn off Wi-Fi while connected")
+    daemon("set wifi_off 1")
+    check("Wi-Fi turned off without reconnecting", power_is("Off"))
+    invariants("Wi-Fi off")
+
+    # 暫停跟拔線走同一條路：撤掉網路服務、刪掉介面，主迴圈回報手機不在
+    t0 = time.time()
+    check("paused", pause_and_wait())
+    check("Wi-Fi back on after the tether goes away", power_is("On"))
+    ok = wait_until(lambda: wifi_up() and uncached_lookup()[0], 30, 0.5)
+    check("DNS works over Wi-Fi again", bool(ok), f"{time.time() - t0:.1f} s after the tether went away")
+
+    daemon("set enabled 1")
+    check("reconnected", wait_connected() is not None)
+    check("Wi-Fi off again on the next connection", power_is("Off"))
+
+    set_wifi_power(True)
+    time.sleep(7)  # 超過 daemon 每 5 秒一次的檢查
+    check("Wi-Fi the user turns back on stays on", wifi_power() == "On")
+    check("paused", pause_and_wait())
+    set_wifi_power(False)
+    daemon("set enabled 1")
+    check("reconnected with Wi-Fi already off", wait_connected() is not None)
+    check("paused", pause_and_wait())
+    time.sleep(3)
+    check("Wi-Fi that was already off stays off", wifi_power() == "Off")
+    set_wifi_power(True)
+    daemon("set enabled 1")
+    check("reconnected", wait_connected() is not None)
+    check("Wi-Fi off again", power_is("Off"))
+
+    before = run("/usr/bin/pgrep", "-x", "droidtetherd").split()
+    try:
+        daemon("debug abort", timeout=2)
+    except (OSError, ValueError):
+        pass
+    s = wait_connected(40)
+    check("daemon restarted and reconnected", s is not None and run("/usr/bin/pgrep", "-x", "droidtetherd").split() != before)
+    check("Wi-Fi still off after the crash", wifi_power() == "Off")
+    check("paused", pause_and_wait())
+    check("restarted daemon still turns Wi-Fi back on", power_is("On"))
+    daemon("set enabled 1")
+    s = wait_connected()
+    check("reconnected", s is not None)
+    check("Wi-Fi off again", power_is("Off"))
+
+    since = (status() or {}).get("since")
+    daemon("set wifi_off 0")
+    check("turning the setting off brings Wi-Fi back", power_is("On"))
+    check("without reconnecting", (status() or {}).get("since") == since and status()["state"] == "connected")
+    invariants("setting off")
 
 
 def summary():

@@ -3,6 +3,7 @@
 //   set enabled 0|1            暫停 / 恢復
 //   set primary 0|1            要不要當主要連線
 //   set dns phone|IP[,IP...]   DNS 來源
+//   set wifi_off 0|1           連線時關掉 Wi-Fi（不用重連）
 //   reconnect                  斷開重連
 //   quit                       結束行程（launchd 會重新啟動，用在 App 更新後換新版 daemon）
 
@@ -21,6 +22,7 @@
 
 #include <arpa/inet.h>
 
+#include "dnsprobe.h"
 #include "netcfg.h"
 #include "state.h"
 
@@ -73,10 +75,12 @@ static void status_json(sbuf *b) {
         sb_add(b, ",\"gateway\":\"%s\"", ip_str(g_st.gw, t));
         sb_add(b, ",\"netmask\":\"%s\",\"dns\":", ip_str(g_st.mask, t));
         sb_ips(b, g_st.dns, g_st.ndns);
+        sb_add(b, ",\"dns_fallback\":%s", g_st.dns_fallback ? "true" : "false");
     }
     sb_add(b, ",\"rx_bytes\":%lu,\"tx_bytes\":%lu", (unsigned long)g_rx_bytes, (unsigned long)g_tx_bytes);
-    sb_add(b, ",\"config\":{\"enabled\":%s,\"primary\":%s,\"dns_mode\":\"%s\",\"dns_servers\":",
-           g_cfg.enabled ? "true" : "false", g_cfg.primary ? "true" : "false", g_cfg.dns_from_phone ? "phone" : "custom");
+    sb_add(b, ",\"config\":{\"enabled\":%s,\"primary\":%s,\"wifi_off\":%s,\"dns_mode\":\"%s\",\"dns_servers\":",
+           g_cfg.enabled ? "true" : "false", g_cfg.primary ? "true" : "false", g_cfg.wifi_off ? "true" : "false",
+           g_cfg.dns_from_phone ? "phone" : "custom");
     sb_ips(b, g_cfg.dns, g_cfg.dns_from_phone ? 0 : g_cfg.ndns);
     sb_add(b, "}}");
     pthread_mutex_unlock(&g_state_lock);
@@ -123,6 +127,22 @@ static void handle(char *line, sbuf *out) {
             LOGW("control: debug drop-netcfg");
             netcfg_debug_drop();
             sb_add(out, "{\"ok\":true}");
+        } else if (strcmp(key, "dns-probe") == 0 && val) {
+            struct in_addr a;
+            char ifn[16];
+            pthread_mutex_lock(&g_state_lock);
+            strlcpy(ifn, g_st.ifname, sizeof ifn);
+            pthread_mutex_unlock(&g_state_lock);
+            if (!ifn[0] || inet_pton(AF_INET, val, &a) != 1) {
+                sb_add(out, "{\"ok\":false}");
+            } else {
+                bool answered = dnsprobe_server(ifn, a.s_addr, 1500);
+                sb_add(out, "{\"ok\":true,\"answered\":%s}", answered ? "true" : "false");
+            }
+        } else if (strcmp(key, "dns-probe-fail") == 0 && val) {
+            g_dns_probe_fail = strcmp(val, "0") != 0;
+            LOGW("control: debug dns-probe-fail %d", (int)g_dns_probe_fail);
+            sb_add(out, "{\"ok\":true}");
         } else if (strcmp(key, "abort") == 0) {
             LOGW("control: debug abort (simulated crash)");
             abort();
@@ -136,12 +156,15 @@ static void handle(char *line, sbuf *out) {
         pthread_mutex_lock(&g_state_lock);
         if (strcmp(key, "enabled") == 0) g_cfg.enabled = strcmp(val, "0") != 0;
         else if (strcmp(key, "primary") == 0) g_cfg.primary = strcmp(val, "0") != 0;
+        else if (strcmp(key, "wifi_off") == 0) g_cfg.wifi_off = strcmp(val, "0") != 0;
         else if (strcmp(key, "dns") == 0) ok = config_parse_dns(val, &g_cfg) == 0;
         else ok = false;
         pthread_mutex_unlock(&g_state_lock);
         if (ok) {
             LOGI("control: set %s %s", key, val);
-            apply_change();
+            // Wi-Fi 設定由連線中的定期檢查套用，不用斷線重連
+            if (strcmp(key, "wifi_off") == 0) config_save(g_config_path);
+            else apply_change();
             status_json(out);
         } else {
             sb_add(out, "{\"ok\":false,\"error\":\"invalid_value\"}");

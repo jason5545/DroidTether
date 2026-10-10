@@ -6,6 +6,7 @@ struct DaemonStatus: Decodable, Equatable {
     struct Config: Decodable, Equatable {
         var enabled: Bool
         var primary: Bool
+        var wifiOff: Bool?  // 0.3.5 起才有
         var dnsMode: String
         var dnsServers: [String]
     }
@@ -21,6 +22,7 @@ struct DaemonStatus: Decodable, Equatable {
     var gateway: String?
     var netmask: String?
     var dns: [String]?
+    var dnsFallback: Bool?
     var rxBytes: UInt64?
     var txBytes: UInt64?
     var config: Config?

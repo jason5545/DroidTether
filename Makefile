@@ -1,5 +1,5 @@
 BREW     ?= $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
-VERSION  ?= 0.3.4
+VERSION  ?= 0.3.5
 BUILD    ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
 SIGN_ID  ?= Apple Development
 CC       := clang
@@ -33,8 +33,8 @@ build:
 
 # ---------- 測試（不需要裝置） ----------
 
-build/test_packets: tests/test_packets.c src/dhcp.c src/rndis.c src/*.h | build
-	$(CC) $(CFLAGS) tests/test_packets.c src/dhcp.c src/rndis.c $(LDLIBS) -o $@
+build/test_packets: tests/test_packets.c src/dhcp.c src/rndis.c src/dnsprobe.c src/*.h | build
+	$(CC) $(CFLAGS) tests/test_packets.c src/dhcp.c src/rndis.c src/dnsprobe.c $(LDLIBS) -o $@
 
 test: build/test_packets
 	build/test_packets build/test_packets.pcap

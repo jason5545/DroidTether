@@ -23,11 +23,13 @@
 #include <unistd.h>
 
 #include "dhcp.h"
+#include "dnsprobe.h"
 #include "feth.h"
 #include "netcfg.h"
 #include "rndis.h"
 #include "state.h"
 #include "usb.h"
+#include "wifi.h"
 
 extern char **environ;
 
@@ -378,9 +380,47 @@ static void ensure_default_route(const char *ifname, uint32_t gw) {
     run_cmd(b);
 }
 
+// ---------- DNS ----------
+
+#define DNS_PROBE_MS 1500
+#define DNS_REPROBE_S 60
+
+// 手機給的 DNS 逐一直接問，回傳有回應的幾台（放進 out）。
+static int probe_phone_dns(const char *ifname, const uint32_t *phone, int n, uint32_t *out) {
+    if (g_dns_probe_fail) return 0;
+    int k = 0;
+    for (int i = 0; i < n; i++)
+        if (dnsprobe_server(ifname, phone[i], DNS_PROBE_MS)) out[k++] = phone[i];
+    return k;
+}
+
+// 手機不轉發 DNS 時改用的，跟 MacTethering 的預設一樣。
+static int fallback_dns(uint32_t *out) {
+    out[0] = htonl(0x08080808u);
+    out[1] = htonl(0x08080404u);
+    return 2;
+}
+
+static void dns_list(char *buf, size_t cap, const uint32_t *dns, int n) {
+    buf[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        char t[16];
+        if (i) strlcat(buf, ",", cap);
+        strlcat(buf, ip_str(dns[i], t), cap);
+    }
+}
+
 // ---------- 一次連線 ----------
 
-static void run_session(usbdev_t *u, const dt_config *opt) {
+static bool wifi_wanted(void) {
+    pthread_mutex_lock(&g_state_lock);
+    bool w = g_cfg.wifi_off && g_cfg.primary;
+    pthread_mutex_unlock(&g_state_lock);
+    return w;
+}
+
+// 回傳 true 表示還沒連上就失敗了。
+static bool run_session(usbdev_t *u, const dt_config *opt) {
     session_t *s = calloc(1, sizeof *s);
     s->u = u;
     s->net.bpf = -1;
@@ -445,6 +485,25 @@ static void run_session(usbdev_t *u, const dt_config *opt) {
         goto out;
     }
 
+    // 有些手機的 USB 網路分享不轉發 DNS。交給系統之前先直接問一次，沒回應就改用備用 DNS，之後定期再問手機。
+    uint32_t phone_dns[4];
+    int nphone = 0;
+    bool fallback = false;
+    if (opt->dns_from_phone) {
+        memcpy(phone_dns, dns, sizeof phone_dns);
+        nphone = ndns;
+        ndns = probe_phone_dns(s->net.host, phone_dns, nphone, dns);
+        if (!ndns) {
+            char pl[80], fl[80];
+            dns_list(pl, sizeof pl, phone_dns, nphone);
+            ndns = fallback_dns(dns);
+            dns_list(fl, sizeof fl, dns, ndns);
+            LOGW("phone did not answer DNS at %s; using %s and asking the phone again every %ds", pl, fl,
+                 DNS_REPROBE_S);
+            fallback = true;
+        }
+    }
+
     if (netcfg_publish(s->net.host, s->ip, mask, s->gw, dns, ndns, opt->primary) != 0) {
         err = "netcfg_failed";
         goto out;
@@ -459,16 +518,14 @@ static void run_session(usbdev_t *u, const dt_config *opt) {
     g_st.mask = mask;
     memcpy(g_st.dns, dns, sizeof g_st.dns);
     g_st.ndns = ndns;
+    g_st.dns_fallback = fallback;
     pthread_mutex_unlock(&g_state_lock);
     status_set(ST_CONNECTED, NULL, "");
+    wifi_tether_up(wifi_wanted());
 
     {
-        char dl[80] = "";
-        for (int i = 0; i < ndns; i++) {
-            char t[16];
-            if (i) strlcat(dl, ",", sizeof dl);
-            strlcat(dl, ip_str(dns[i], t), sizeof dl);
-        }
+        char dl[80];
+        dns_list(dl, sizeof dl, dns, ndns);
         LOGI("tether up on %s: %s -> %s, dns %s, mtu %d, lease %us", s->net.host, ip_str(s->ip, b1), ip_str(s->gw, b2), dl,
              mtu, lease.lease);
     }
@@ -482,6 +539,7 @@ static void run_session(usbdev_t *u, const dt_config *opt) {
     time_t last_req = 0;
     time_t last_stats = start;
     time_t last_check = start;
+    time_t last_probe = start;
     unsigned long prev[4] = {0};
     while (!stopping() && !s->dead) {
         time_t now = mono_now();
@@ -499,6 +557,24 @@ static void run_session(usbdev_t *u, const dt_config *opt) {
             if (!netcfg_present()) {
                 LOGW("network service entry disappeared from configd, registering it again");
                 if (netcfg_republish() == 0 && opt->primary) ensure_default_route(s->net.host, s->gw);
+            }
+            wifi_tether_up(wifi_wanted());
+        }
+        if (fallback && now - last_probe >= DNS_REPROBE_S) {
+            last_probe = now;
+            uint32_t ok_dns[4];
+            int n = probe_phone_dns(s->net.host, phone_dns, nphone, ok_dns);
+            if (n && netcfg_publish(s->net.host, s->ip, mask, s->gw, ok_dns, n, opt->primary) == 0) {
+                char dl[80];
+                dns_list(dl, sizeof dl, ok_dns, n);
+                LOGI("phone answers DNS now; switched to %s", dl);
+                fallback = false;
+                pthread_mutex_lock(&g_state_lock);
+                memcpy(g_st.dns, ok_dns, sizeof g_st.dns);
+                g_st.ndns = n;
+                g_st.dns_fallback = false;
+                pthread_mutex_unlock(&g_state_lock);
+                if (opt->primary) ensure_default_route(s->net.host, s->gw);
             }
         }
         if (now >= expire_at) {
@@ -571,6 +647,7 @@ out:
     pthread_mutex_destroy(&s->mb_lock);
     pthread_cond_destroy(&s->mb_cond);
     free(s);
+    return err != NULL;
 }
 
 // ---------- 進入點 ----------
@@ -694,6 +771,7 @@ int main(int argc, char **argv) {
 
     netcfg_remove_stale();
     feth_destroy_stale();
+    wifi_init(config_path);
     if (control_start(config_path) != 0) LOGW("control socket unavailable; menu bar app cannot talk to the daemon");
     LOGI("droidtetherd %s started", DT_VERSION);
 
@@ -708,6 +786,8 @@ int main(int argc, char **argv) {
         if (!cfg.enabled) {
             if (!was_disabled) LOGI("paused");
             was_disabled = true;
+            // 先把 Wi-Fi 開回來再回報暫停：App 或使用者看到「已暫停」時，Wi-Fi 已經是最後的狀態
+            wifi_tether_gone("paused");
             status_set(ST_DISABLED, "", "");
             last = USB_ERROR;
             sleep_ms_interruptible(1000);
@@ -720,12 +800,16 @@ int main(int argc, char **argv) {
         char hint[128];
         usb_find_result r = usb_find_open(ctx, &u, hint, sizeof hint);
         if (r == USB_FOUND) {
-            run_session(&u, &cfg);
+            if (run_session(&u, &cfg)) wifi_tether_gone("connection failed");
             usb_close(&u);
             last = USB_FOUND;
             sleep_ms_interruptible(1000);
             continue;
         }
+        wifi_tether_gone(r == USB_NOT_FOUND           ? "phone unplugged"
+                         : r == USB_PHONE_NO_TETHER ? "USB tethering is off"
+                         : r == USB_BUSY            ? "device busy"
+                                                    : "USB error");
         if (r == USB_BUSY) status_set(ST_BUSY, hint, "");
         else if (r == USB_PHONE_NO_TETHER) status_set(ST_PHONE_NO_TETHER, hint, "");
         else if (r == USB_NOT_FOUND) status_set(ST_WAITING, "", "");
@@ -738,6 +822,7 @@ int main(int argc, char **argv) {
         sleep_ms_interruptible(2000);
     }
 
+    wifi_tether_gone("daemon stopping");
     LOGI("droidtetherd stopping");
     libusb_exit(ctx);
     return 0;

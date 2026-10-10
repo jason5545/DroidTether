@@ -10,6 +10,7 @@ pthread_mutex_t g_state_lock = PTHREAD_MUTEX_INITIALIZER;
 dt_config g_cfg = {.enabled = true, .primary = true, .dns_from_phone = true};
 dt_status g_st = {.state = ST_STARTING};
 atomic_ulong g_rx_bytes, g_tx_bytes;
+atomic_bool g_dns_probe_fail;
 
 const char *state_name(dt_state st) {
     switch (st) {
@@ -32,6 +33,7 @@ void status_set(dt_state st, const char *device, const char *error) {
             g_st.ifname[0] = '\0';
             g_st.ip = g_st.gw = g_st.mask = 0;
             g_st.ndns = 0;
+            g_st.dns_fallback = false;
         }
     }
     g_st.state = st;
@@ -74,6 +76,7 @@ void config_load(const char *path) {
         const char *k = line, *v = eq + 1;
         if (strcmp(k, "enabled") == 0) g_cfg.enabled = strcmp(v, "0") != 0;
         else if (strcmp(k, "primary") == 0) g_cfg.primary = strcmp(v, "0") != 0;
+        else if (strcmp(k, "wifi_off") == 0) g_cfg.wifi_off = strcmp(v, "0") != 0;
         else if (strcmp(k, "dns") == 0 && config_parse_dns(v, &g_cfg) != 0) LOGW("config: bad dns '%s'", v);
     }
     pthread_mutex_unlock(&g_state_lock);
@@ -96,7 +99,7 @@ int config_save(const char *path) {
         return -1;
     }
     pthread_mutex_lock(&g_state_lock);
-    fprintf(f, "enabled=%d\nprimary=%d\ndns=", g_cfg.enabled, g_cfg.primary);
+    fprintf(f, "enabled=%d\nprimary=%d\nwifi_off=%d\ndns=", g_cfg.enabled, g_cfg.primary, g_cfg.wifi_off);
     if (g_cfg.dns_from_phone) {
         fputs("phone", f);
     } else {

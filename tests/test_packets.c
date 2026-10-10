@@ -1,4 +1,4 @@
-// 不需要裝置的封包測試：DHCP 封包組裝與解析、RNDIS 包裝與拆解。
+// 不需要裝置的封包測試：DHCP 封包組裝與解析、RNDIS 包裝與拆解、DNS 探測的查詢與回覆判斷。
 // 用法：build/test_packets [輸出.pcap]  —— 給了路徑就把組出來的 DHCP 封包寫成 pcap，可用 tcpdump -vvv 檢查 checksum。
 
 #include <arpa/inet.h>
@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "../src/dhcp.h"
+#include "../src/dnsprobe.h"
 #include "../src/rndis.h"
 
 int g_verbose;
@@ -132,6 +133,30 @@ int main(int argc, char **argv) {
     // 長度欄位亂掉不能越界
     put_le32(buf + 4, 0xFFFFFFF0u);
     CHECK(rndis_unwrap(buf, t1 + t2, cb, NULL) == 0);
+
+    // DNS 探測：查詢格式，以及哪些回覆算「有轉發」
+    uint8_t q[64];
+    int qlen = dnsprobe_build(q, sizeof q, 0x1234);
+    static const uint8_t qname[] = "\x07" "captive" "\x05" "apple" "\x03" "com";
+    CHECK(qlen == 12 + (int)sizeof qname + 4);
+    CHECK(get_be16(q) == 0x1234 && get_be16(q + 2) == 0x0100 && get_be16(q + 4) == 1);
+    CHECK(memcmp(q + 12, qname, sizeof qname) == 0);  // sizeof 含結尾的 0，也就是根標籤
+    CHECK(get_be16(q + qlen - 4) == 1 && get_be16(q + qlen - 2) == 1);
+    CHECK(dnsprobe_build(q, 20, 1) == -1);
+    uint8_t a[64];
+    memcpy(a, q, (size_t)qlen);
+    put_be16(a + 2, 0x8180);  // 回覆，NOERROR
+    CHECK(dnsprobe_reply_ok(a, qlen, 0x1234));
+    put_be16(a + 2, 0x8183);  // NXDOMAIN 也代表有在查
+    CHECK(dnsprobe_reply_ok(a, qlen, 0x1234));
+    put_be16(a + 2, 0x8182);  // SERVFAIL
+    CHECK(!dnsprobe_reply_ok(a, qlen, 0x1234));
+    put_be16(a + 2, 0x8185);  // REFUSED
+    CHECK(!dnsprobe_reply_ok(a, qlen, 0x1234));
+    put_be16(a + 2, 0x8180);
+    CHECK(!dnsprobe_reply_ok(a, qlen, 0x4321));  // id 不符
+    CHECK(!dnsprobe_reply_ok(q, qlen, 0x1234));  // 查詢本身不是回覆
+    CHECK(!dnsprobe_reply_ok(a, 11, 0x1234));    // 太短
 
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);

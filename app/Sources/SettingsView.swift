@@ -41,6 +41,11 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
 
+                if config?.dnsMode == "phone", model.status?.dnsFallback == true {
+                    Text("The phone does not answer DNS queries, so 8.8.8.8 and 8.8.4.4 are used. DroidTether switches back once the phone answers.")
+                        .foregroundStyle(.secondary)
+                }
+
                 if config?.dnsMode == "custom" {
                     HStack {
                         TextField("1.1.1.1, 8.8.8.8", text: $customDNS)
@@ -57,6 +62,16 @@ struct SettingsView: View {
             } footer: {
                 Text("Changing these settings reconnects USB tethering for a moment.")
                     .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle(isOn: Binding(
+                    get: { config?.wifiOff ?? false },
+                    set: { model.setWifiOff($0) })) {
+                    Text("Turn off Wi-Fi while connected")
+                    Text("Wi-Fi comes back on when you unplug the phone or pause. Only when the phone is the main connection.")
+                }
+                .disabled(config?.wifiOff == nil || !(config?.primary ?? true))
             }
 
             Section {

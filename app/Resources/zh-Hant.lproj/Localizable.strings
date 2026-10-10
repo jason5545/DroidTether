@@ -44,9 +44,12 @@
 "DNS" = "DNS";
 "Provided by the phone" = "使用手機提供的";
 "Custom" = "自訂";
+"The phone does not answer DNS queries, so 8.8.8.8 and 8.8.4.4 are used. DroidTether switches back once the phone answers." = "手機沒有回應 DNS 查詢，目前改用 8.8.8.8、8.8.4.4。手機恢復回應後會自動切回。";
 "Apply" = "套用";
 "Enter up to four IPv4 addresses separated by commas." = "請輸入最多四個 IPv4 位址，用逗號分隔。";
 "Network" = "網路";
+"Turn off Wi-Fi while connected" = "連線時關閉 Wi-Fi";
+"Wi-Fi comes back on when you unplug the phone or pause. Only when the phone is the main connection." = "拔掉手機或暫停時，Wi-Fi 會自動打開。只在手機設為主要連線時有效。";
 "Changing these settings reconnects USB tethering for a moment." = "變更這些設定時，USB 網路分享會短暫重新連線。";
 "App" = "App";
 "Background service" = "背景服務";
