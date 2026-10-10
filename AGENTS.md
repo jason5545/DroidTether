@@ -1,6 +1,6 @@
 # Tetherline（舊名 DroidTether）協作規則
 
-App 顯示名稱和 repo 在 0.4 改成 Tetherline。bundle ID（`io.github.jason5545.DroidTether`）、背景服務 label（`io.github.jason5545.droidtether`）、`droidtetherd`、設定檔、記錄檔、socket、configd 的服務 ID `DroidTether` 都刻意沿用舊名：改了系統會當成另一個 App，背景項目要重新允許，還可能卡 LWCR 要重開機。
+App 顯示名稱和 repo 在 0.4 改成 Tetherline。bundle ID（`io.github.jason5545.DroidTether`）、背景服務 label（`io.github.jason5545.droidtether`）、`droidtetherd`、設定檔、記錄檔、socket、configd 的服務 ID `DroidTether` 都刻意沿用舊名：改了系統會當成另一個 App，背景項目要重新允許，還可能卡 LWCR 要重開機。2026/10/10 從 `/Applications/DroidTether.app`（0.3.7）換成 `/Applications/Tetherline.app`（0.4.0），背景服務 1 秒內用新 bundle 重啟，不用重新允許、不用重開機。
 
 ## 本機部署：一律用公證版
 

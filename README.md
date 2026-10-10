@@ -7,7 +7,7 @@ USB tethering for macOS, from Android phones and 4G/5G USB modems: a menu bar ap
 No kernel extension, no DriverKit, no SIP changes, and DNS that actually follows the phone.
 </p>
 
-<p align="center"><sub>Formerly DroidTether. The bundle identifier, the background service, its settings and its log keep the old name.</sub></p>
+<p align="center"><sub>Formerly DroidTether. The bundle identifier, the background service, its settings and its log keep the old name, so updating from DroidTether 0.3.x needs no new approval and no restart (tested going from 0.3.7 to 0.4.0).</sub></p>
 
 <p align="center"><a href="#繁體中文">繁體中文</a></p>
 
@@ -204,7 +204,7 @@ Tetherline shares no code with any of them.
 
 Tetherline 讓 Mac 透過 USB 使用 Android 手機或 4G/5G USB 數據機的網路。它由選單列 App 和一個使用者空間的小驅動組成，不用 kext、不用 DriverKit，也不用關 SIP。
 
-舊名 DroidTether。bundle ID、背景服務、設定檔和記錄檔沿用舊名。
+舊名 DroidTether。bundle ID、背景服務、設定檔和記錄檔沿用舊名，從 DroidTether 0.3.x 更新不用重新允許背景項目，也不用重開機（0.3.7 換 0.4.0 實測）。
 
 <p align="center"><img src="docs/panel-zh-dark.png" width="320" alt="Tetherline 選單列面板"></p>
 
