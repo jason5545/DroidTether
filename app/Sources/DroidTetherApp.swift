@@ -7,7 +7,7 @@ struct DroidTetherApp: App {
     @StateObject private var model = TetherModel.shared
 
     init() {
-        // 除錯用：DroidTether --snapshot <路徑前綴> [秒數]，等資料累積後輸出面板的淺色、深色截圖就結束。
+        // 除錯用：Tetherline --snapshot <路徑前綴> [秒數]，等資料累積後輸出面板的淺色、深色截圖就結束。
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
             let prefix = args[i + 1]
@@ -76,7 +76,7 @@ enum SettingsWindow {
     static func show() {
         if window == nil {
             let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(model: .shared)))
-            w.title = NSLocalizedString("DroidTether Settings", comment: "")
+            w.title = NSLocalizedString("Tetherline Settings", comment: "")
             w.styleMask = [.titled, .closable]
             w.isReleasedWhenClosed = false
             w.center()
@@ -96,7 +96,7 @@ struct PanelView: View {
             header
 
             if model.serviceState == .requiresApproval {
-                notice(NSLocalizedString("Allow DroidTether in System Settings to start the background service.", comment: ""),
+                notice(NSLocalizedString("Allow Tetherline in System Settings to start the background service.", comment: ""),
                        action: NSLocalizedString("Open System Settings", comment: "")) { model.openLoginItemsSettings() }
             } else if model.serviceState == .failed {
                 notice(NSLocalizedString("The background service could not be installed.", comment: ""),
@@ -161,7 +161,7 @@ struct PanelView: View {
         case "connecting": return String(format: NSLocalizedString("Connecting to %@…", comment: ""), device)
         case "phone_no_tether": return String(format: NSLocalizedString("%@ is connected", comment: ""), device)
         case "busy": return String(format: NSLocalizedString("%@ is in use by another app", comment: ""), device)
-        case "waiting", "starting": return NSLocalizedString("Waiting for an Android phone", comment: "")
+        case "waiting", "starting": return NSLocalizedString("Waiting for a phone or modem", comment: "")
         case "disabled": return NSLocalizedString("USB tethering paused", comment: "")
         default: return NSLocalizedString("Background service not running", comment: "")
         }

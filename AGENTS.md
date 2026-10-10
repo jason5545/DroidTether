@@ -1,10 +1,12 @@
-# DroidTether 協作規則
+# Tetherline（舊名 DroidTether）協作規則
+
+App 顯示名稱和 repo 在 0.4 改成 Tetherline。bundle ID（`io.github.jason5545.DroidTether`）、背景服務 label（`io.github.jason5545.droidtether`）、`droidtetherd`、設定檔、記錄檔、socket、configd 的服務 ID `DroidTether` 都刻意沿用舊名：改了系統會當成另一個 App，背景項目要重新允許，還可能卡 LWCR 要重開機。
 
 ## 本機部署：一律用公證版
 
-- 裝到這台 Mac 的 `/Applications/DroidTether.app`，只能用 `scripts/release.sh <版本>` 產出的 Developer ID 簽章、Apple 公證版。
+- 裝到這台 Mac 的 `/Applications/Tetherline.app`（0.4 以前是 `DroidTether.app`，安裝時一併移除），只能用 `scripts/release.sh <版本>` 產出的 Developer ID 簽章、Apple 公證版。
 - 不准用 `make install`，也不准把 `make app` 的產物複製進 `/Applications`。那是 Apple Development 簽章，給沒有 Developer ID 的外部開發者用。
-- release.sh 結束時會刪掉中間產物，公證版從 `build/dist/DroidTether-<版本>.zip` 解出來：先 `codesign --verify --deep --strict`、`spctl -a -vv -t exec` 確認是 Notarized Developer ID，再取代 `/Applications/DroidTether.app`，解壓的副本用 `lsregister -u` 取消登記後刪掉。
+- release.sh 結束時會刪掉中間產物，公證版從 `build/dist/Tetherline-<版本>.zip` 解出來：先 `codesign --verify --deep --strict`、`spctl -a -vv -t exec` 確認是 Notarized Developer ID，再取代 `/Applications/Tetherline.app`（同時刪掉舊的 `DroidTether.app`），解壓的副本用 `lsregister -u` 取消登記後刪掉。
 - 改版本時同步改 `Makefile` 的 `VERSION`，App 打開後會請舊版 daemon 結束，launchd 用新版重啟。
 
 ### 為什麼

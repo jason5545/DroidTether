@@ -1,5 +1,5 @@
 # xcodegen 設定。只用在發版（Developer ID 簽章與公證，見 scripts/release.sh）；平常開發用 Makefile。
-name: DroidTether
+name: Tetherline
 options:
   bundleIdPrefix: io.github.jason5545
   developmentLanguage: en
@@ -37,7 +37,7 @@ targets:
       - sdk: CoreFoundation.framework
       - sdk: SystemConfiguration.framework
       - sdk: Security.framework
-  DroidTether:
+  Tetherline:
     type: application
     platform: macOS
     sources:
@@ -82,7 +82,7 @@ targets:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/AppIcon.icns
     settings:
       base:
-        PRODUCT_NAME: DroidTether
+        PRODUCT_NAME: Tetherline
         PRODUCT_BUNDLE_IDENTIFIER: io.github.jason5545.DroidTether
         INFOPLIST_FILE: app/Info.plist
         GENERATE_INFOPLIST_FILE: NO

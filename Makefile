@@ -1,5 +1,5 @@
 BREW     ?= $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
-VERSION  ?= 0.3.7
+VERSION  ?= 0.4.0
 BUILD    ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
 SIGN_ID  ?= Apple Development
 CC       := clang
@@ -11,7 +11,7 @@ SRC      := $(wildcard src/*.c)
 OBJ      := $(SRC:src/%.c=build/%.o)
 DAEMON   := build/droidtetherd
 
-APP      := build/DroidTether.app
+APP      := build/Tetherline.app
 SWIFT    := $(wildcard app/Sources/*.swift)
 LABEL    := io.github.jason5545.droidtether
 
@@ -64,7 +64,7 @@ app: $(APP)
 $(APP): $(DAEMON) $(SWIFT) app/Info.plist app/$(LABEL).plist app/Resources/*/* build/AppIcon.icns LICENSE THIRD-PARTY-NOTICES.md
 	rm -rf $@
 	mkdir -p $@/Contents/MacOS $@/Contents/Resources $@/Contents/Library/LaunchDaemons
-	swiftc -O -swift-version 5 -target arm64-apple-macos26.0 -parse-as-library $(SWIFT) -o $@/Contents/MacOS/DroidTether
+	swiftc -O -swift-version 5 -target arm64-apple-macos26.0 -parse-as-library $(SWIFT) -o $@/Contents/MacOS/Tetherline
 	cp $(DAEMON) $@/Contents/MacOS/droidtetherd
 	sed -e 's/$$(MARKETING_VERSION)/$(VERSION)/' -e 's/$$(CURRENT_PROJECT_VERSION)/$(BUILD)/' app/Info.plist > $@/Contents/Info.plist
 	cp app/$(LABEL).plist $@/Contents/Library/LaunchDaemons/
@@ -80,8 +80,8 @@ $(APP): $(DAEMON) $(SWIFT) app/Info.plist app/$(LABEL).plist app/Resources/*/* b
 # 只裝到 /Applications；背景服務由 App 第一次啟動時向系統註冊。
 install: $(APP)
 	-osascript -e 'tell application id "io.github.jason5545.DroidTether" to quit' 2>/dev/null
-	rm -rf /Applications/DroidTether.app
-	ditto $(APP) /Applications/DroidTether.app
+	rm -rf /Applications/DroidTether.app /Applications/Tetherline.app  # 改名前的舊版一起移除
+	ditto $(APP) /Applications/Tetherline.app
 
 # 發布用：DMG（拖進「應用程式」）、ZIP、SHA-256
 DIST := build/dist
@@ -93,12 +93,12 @@ dist: $(APP) package
 
 package:
 	rm -rf $(DIST) && mkdir -p $(DIST)/stage
-	ditto "$(APP_SRC)" $(DIST)/stage/DroidTether.app
+	ditto "$(APP_SRC)" $(DIST)/stage/Tetherline.app
 	ln -s /Applications $(DIST)/stage/Applications
 	cp LICENSE THIRD-PARTY-NOTICES.md $(DIST)/stage/
-	hdiutil create -quiet -volname "DroidTether $(VERSION)" -srcfolder $(DIST)/stage -ov -format UDZO $(DIST)/DroidTether-$(VERSION).dmg
-	cd $(DIST) && ditto -c -k --keepParent stage/DroidTether.app DroidTether-$(VERSION).zip
-	cd $(DIST) && shasum -a 256 DroidTether-$(VERSION).dmg DroidTether-$(VERSION).zip > SHA256SUMS.txt
+	hdiutil create -quiet -volname "Tetherline $(VERSION)" -srcfolder $(DIST)/stage -ov -format UDZO $(DIST)/Tetherline-$(VERSION).dmg
+	cd $(DIST) && ditto -c -k --keepParent stage/Tetherline.app Tetherline-$(VERSION).zip
+	cd $(DIST) && shasum -a 256 Tetherline-$(VERSION).dmg Tetherline-$(VERSION).zip > SHA256SUMS.txt
 	rm -rf $(DIST)/stage
 	cat $(DIST)/SHA256SUMS.txt
 

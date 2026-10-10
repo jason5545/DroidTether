@@ -112,7 +112,7 @@ final class TetherModel: ObservableObject {
         wifiGuardTried = true
         Task.detached {
             if let ifname = WifiGuard.restoreIfDaemonTurnedItOff() {
-                NSLog("DroidTether: background service unreachable; turned Wi-Fi (\(ifname)) back on")
+                NSLog("Tetherline: background service unreachable; turned Wi-Fi (\(ifname)) back on")
             }
         }
     }
@@ -165,7 +165,7 @@ final class TetherModel: ObservableObject {
         do {
             try service.register()
         } catch {
-            NSLog("DroidTether: daemon register failed: \(error)")
+            NSLog("Tetherline: daemon register failed: \(error)")
         }
         updateServiceState()
         if service.status == .notRegistered || service.status == .notFound { serviceState = .failed }
@@ -179,7 +179,7 @@ final class TetherModel: ObservableObject {
         do {
             if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         } catch {
-            NSLog("DroidTether: login item change failed: \(error)")
+            NSLog("Tetherline: login item change failed: \(error)")
         }
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }

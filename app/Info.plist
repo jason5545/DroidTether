@@ -5,11 +5,11 @@
     <key>CFBundleIdentifier</key>
     <string>io.github.jason5545.DroidTether</string>
     <key>CFBundleName</key>
-    <string>DroidTether</string>
+    <string>Tetherline</string>
     <key>CFBundleDisplayName</key>
-    <string>DroidTether</string>
+    <string>Tetherline</string>
     <key>CFBundleExecutable</key>
-    <string>DroidTether</string>
+    <string>Tetherline</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -30,6 +30,6 @@
     <key>LSUIElement</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>Android USB tethering for macOS</string>
+    <string>USB tethering for Android phones and 4G/5G modems</string>
 </dict>
 </plist>

@@ -11,7 +11,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Open DroidTether at login", isOn: Binding(
+                Toggle("Open Tetherline at login", isOn: Binding(
                     get: { model.launchAtLogin },
                     set: { model.setLaunchAtLogin($0) }))
             }
@@ -42,7 +42,7 @@ struct SettingsView: View {
                 .pickerStyle(.radioGroup)
 
                 if config?.dnsMode == "phone", model.status?.dnsFallback == true {
-                    Text("The phone does not answer DNS queries, so 8.8.8.8 and 8.8.4.4 are used. DroidTether switches back once the phone answers.")
+                    Text("The phone does not answer DNS queries, so 8.8.8.8 and 8.8.4.4 are used. Tetherline switches back once the phone answers.")
                         .foregroundStyle(.secondary)
                 }
 
