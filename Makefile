@@ -1,5 +1,5 @@
 BREW     ?= $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
-VERSION  ?= 0.3.5
+VERSION  ?= 0.3.7
 BUILD    ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
 SIGN_ID  ?= Apple Development
 CC       := clang

@@ -36,6 +36,9 @@ final class TetherModel: ObservableObject {
     private var timer: Timer?
     private var lastSample: (date: Date, rx: UInt64, tx: UInt64)?
     private var restartedStaleDaemon = false
+    private var unreachableSince: Date?
+    private var wifiGuardTried = false
+    static let wifiGuardDelay: TimeInterval = 10
     private var sampleID = 0
     private var pingInFlight = false
     private var tick = 0
@@ -92,6 +95,26 @@ final class TetherModel: ObservableObject {
         }
         if status != s { status = s }
         restartDaemonIfStale(s)
+        guardWifi(daemonReachable: s != nil)
+    }
+
+    /// daemon 連續 10 秒連不上，就把它關掉的 Wi-Fi 開回來；一次斷線只試一次。
+    /// 正常重啟（更新、當掉後 launchd 拉起來）幾秒內就會回來，不會走到這裡。
+    private func guardWifi(daemonReachable: Bool) {
+        if daemonReachable {
+            unreachableSince = nil
+            wifiGuardTried = false
+            return
+        }
+        let since = unreachableSince ?? Date()
+        unreachableSince = since
+        guard !wifiGuardTried, Date().timeIntervalSince(since) >= Self.wifiGuardDelay else { return }
+        wifiGuardTried = true
+        Task.detached {
+            if let ifname = WifiGuard.restoreIfDaemonTurnedItOff() {
+                NSLog("DroidTether: background service unreachable; turned Wi-Fi (\(ifname)) back on")
+            }
+        }
     }
 
     private func record(_ date: Date) {

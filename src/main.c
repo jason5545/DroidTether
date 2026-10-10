@@ -344,40 +344,37 @@ static int dhcp_acquire(session_t *s, dhcp_reply_t *lease) {
 
 // ---------- 路由 ----------
 
-static bool route_uses(const char *ifname) {
+// 預設路由目前走的介面（查 1.1.1.1），查不到時 out 為空字串。
+static void default_route_iface(char *out, size_t n) {
+    out[0] = '\0';
     FILE *p = popen("/sbin/route -n get -inet 1.1.1.1 2>/dev/null", "r");
-    if (!p) return false;
+    if (!p) return;
     char line[256];
-    bool hit = false;
     while (fgets(line, sizeof line, p)) {
         char *k = strstr(line, "interface:");
         if (!k) continue;
         k += strlen("interface:");
         while (*k == ' ') k++;
         k[strcspn(k, "\r\n")] = '\0';
-        hit = strcmp(k, ifname) == 0;
+        strlcpy(out, k, n);
     }
     pclose(p);
-    return hit;
 }
 
-// configd 收到 OverridePrimary 後會自己改預設路由；等不到才補兩條 /1 路由。
-// 這兩條路由綁在 feth 上，介面消失時核心會一起清掉。
-static void ensure_default_route(const char *ifname, uint32_t gw) {
+// configd 收到 OverridePrimary 後會自己改預設路由，這裡只等它、記一筆。
+// 等不到不自己補 0/1、128/1：那是 VPN（例如 Tailscale exit node）排在前面，
+// 補上去會蓋過 VPN 的預設路由，流量變成從手機明文出去（10/10 實測重現）。
+static void wait_default_route(const char *ifname) {
+    char cur[IFNAMSIZ];
     for (int i = 0; i < 30; i++) {
-        if (route_uses(ifname)) {
+        default_route_iface(cur, sizeof cur);
+        if (strcmp(cur, ifname) == 0) {
             LOGI("default route now via %s (set by configd)", ifname);
             return;
         }
         sleep_ms_interruptible(100);
     }
-    char g[16];
-    ip_str(gw, g);
-    LOGW("configd did not move the default route; adding split routes via %s", g);
-    const char *a[] = {"/sbin/route", "-q", "-n", "add", "-net", "0.0.0.0/1", g, NULL};
-    const char *b[] = {"/sbin/route", "-q", "-n", "add", "-net", "128.0.0.0/1", g, NULL};
-    run_cmd(a);
-    run_cmd(b);
+    LOGI("default route stays on %s (a higher-ranked service such as a VPN); leaving it alone", cur[0] ? cur : "?");
 }
 
 // ---------- DNS ----------
@@ -509,7 +506,7 @@ static bool run_session(usbdev_t *u, const dt_config *opt) {
         goto out;
     }
     published = true;
-    if (opt->primary) ensure_default_route(s->net.host, s->gw);
+    if (opt->primary) wait_default_route(s->net.host);
 
     pthread_mutex_lock(&g_state_lock);
     strlcpy(g_st.ifname, s->net.host, sizeof g_st.ifname);
@@ -556,7 +553,7 @@ static bool run_session(usbdev_t *u, const dt_config *opt) {
             last_check = now;
             if (!netcfg_present()) {
                 LOGW("network service entry disappeared from configd, registering it again");
-                if (netcfg_republish() == 0 && opt->primary) ensure_default_route(s->net.host, s->gw);
+                if (netcfg_republish() == 0 && opt->primary) wait_default_route(s->net.host);
             }
             wifi_tether_up(wifi_wanted());
         }
@@ -574,7 +571,7 @@ static bool run_session(usbdev_t *u, const dt_config *opt) {
                 g_st.ndns = n;
                 g_st.dns_fallback = false;
                 pthread_mutex_unlock(&g_state_lock);
-                if (opt->primary) ensure_default_route(s->net.host, s->gw);
+                if (opt->primary) wait_default_route(s->net.host);
             }
         }
         if (now >= expire_at) {

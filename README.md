@@ -21,6 +21,7 @@ macOS has no RNDIS driver, HoRNDIS no longer loads on Apple Silicon without lowe
 DroidTether fixes both:
 
 - The tether is registered as a complete network service, with `IPv4`, `DNS` and `OverridePrimary`. `configd` then moves the default route and the resolver to the phone itself. Wi-Fi can stay on.
+- A full-tunnel VPN still wins. With a Tailscale exit node on, `configd` keeps the VPN's default route even though the tether asks for `OverridePrimary`, and DroidTether adds no routes of its own to override that, so the VPN's traffic stays inside the tunnel. `tests/vpn_logic_test.py` checks this from both orders: exit node first, or tether first.
 - The service is written with `SCDynamicStoreAddTemporaryValue`, so `configd` removes it when the daemon exits, even on `kill -9`. Wi-Fi takes over again within a few seconds.
 - The Mac side is a `feth` pair (macOS's built-in fake Ethernet), which Network.framework reports as `wiredEthernet`. Tailscale and other `NWPathMonitor` users keep working.
 - DNS defaults to the server the phone hands out over DHCP. A custom list is optional. Some tethering tools say Android's USB link does not proxy DNS and always use public servers. On a POCO F8 Ultra with HyperOS the phone's own DNS does answer over the USB link: a direct query to it with Wi-Fi off came back in under 100 ms, and the live test asks it directly on every run. Other phones may differ, so DroidTether asks the phone first and falls back to 8.8.8.8 and 8.8.4.4 only if it gets no answer. It then asks the phone again every minute and switches back once it answers.
@@ -90,7 +91,7 @@ On first launch, macOS asks you to allow the background item. Turn on **DroidTet
 - Turn on USB tethering on the phone. If your ROM keeps the AOSP developer option **Default USB configuration**, setting it to *USB tethering* skips this step every time you plug in.
 - Click the menu bar icon for the panel. The gear opens Settings. Opening DroidTether again from Applications or Spotlight also brings up Settings.
 - **Use as the main connection** (on by default) sends all traffic and DNS through the phone. Turn it off to keep Wi-Fi primary and leave the tether available as a secondary interface.
-- **Turn off Wi-Fi while connected** (off by default) switches Wi-Fi off once the tether is up, and back on when you unplug the phone, turn tethering off on the phone, pause, or quit. Only Wi-Fi that DroidTether switched off comes back on: if it was already off when you plugged in, or you turn it back on yourself while connected, DroidTether leaves it alone. It works only while the phone is the main connection. Wi-Fi usually rejoins within a couple of seconds after you unplug; until then the Mac has no connection.
+- **Turn off Wi-Fi while connected** (off by default) switches Wi-Fi off once the tether is up, and back on when you unplug the phone, turn tethering off on the phone, pause, or quit. Only Wi-Fi that DroidTether switched off comes back on: if it was already off when you plugged in, or you turn it back on yourself while connected, DroidTether leaves it alone. It works only while the phone is the main connection. Wi-Fi usually rejoins within a couple of seconds after you unplug; until then the Mac has no connection. If the background service stops and launchd cannot start it again (for example after switching between differently signed copies, see Troubleshooting), the menu bar app turns that Wi-Fi back on after 10 seconds.
 - **With Tailscale's "Use Tailscale DNS" on**, Tailscale can handle DNS first. On the test machine (tailnet global nameservers 8.8.8.8 and 8.8.4.4), macOS sent ordinary names to 100.100.100.100 rather than to the phone, even with DroidTether as the main connection. DroidTether's DNS setting then only matters for queries that reach the system resolvers; traffic, including Tailscale's own DNS forwarding, still goes through the phone. In `scutil --dns` this shows up as a Tailscale resolver with no `domain` and a lower `order` than DroidTether's.
 
 ## Troubleshooting
@@ -119,6 +120,10 @@ python3 tests/dns_logic_test.py --quick   # live DNS/routing invariants with the
 python3 tests/dns_logic_test.py           # plus reconnect, pause, DNS and primary switches, Wi-Fi off while
                                           # connected, configd losing our entries, and a daemon crash
                                           # (the connection drops briefly)
+python3 tests/vpn_logic_test.py           # a Tailscale exit node layered on the tether keeps the default route
+                                          # (switches to an exit node and back; needs Tailscale online)
+swiftc -O -parse-as-library app/Sources/WifiGuard.swift tests/wifi_guard_test.swift -o build/wifi_guard_test
+build/wifi_guard_test                     # when the app turns Wi-Fi back on (toggles Wi-Fi, restores it)
 ```
 
 The live test also reproduces the DNS-only write that broke the tools this project replaces, and checks that `configd` ignores it while DroidTether's entry is the one in use.
@@ -162,6 +167,7 @@ Several projects tackle the same problem, most of them started in 2026:
 - [jwise/HoRNDIS](https://github.com/jwise/HoRNDIS), the original kernel extension.
 - [XiaoMiku01/TetherKit](https://github.com/XiaoMiku01/TetherKit): libusb, `feth` and BPF in C++, with asynchronous USB transfers. The closest relative of this project.
 - [noahhhi/HoRNDIS-Userspace](https://github.com/noahhhi/HoRNDIS-Userspace): IOUSBHost and `feth`, with careful privilege separation.
+- [jost-s/macos-usb-tether-android](https://github.com/jost-s/macos-usb-tether-android) (muta): Rust, nusb and `utun`, with no `OverridePrimary` and no split routes so that a VPN on top keeps its traffic. Reading it is what led to the VPN test in this repository.
 - [s4wbvnny/BetterTether](https://github.com/s4wbvnny/BetterTether) and [francescoterrito/android-rndis-macos](https://github.com/francescoterrito/android-rndis-macos): libusb with `utun`.
 - [prostec-labs/TetherKit](https://github.com/prostec-labs/TetherKit): a DriverKit port, which needs entitlements approved by Apple.
 
@@ -189,6 +195,7 @@ DroidTether 讓 Mac 透過 USB 使用 Android 手機的網路。它由選單列 
 DroidTether 的做法：
 
 - 把手機註冊成完整的網路服務（IPv4、DNS 加 `OverridePrimary`），由系統自己把預設路由和 DNS 切到手機。Wi-Fi 開著也沒關係。
+- 開全通道 VPN 時讓 VPN 優先。實測開 Tailscale exit node 時，就算手機要求 `OverridePrimary`，系統還是把預設路由留給 VPN；DroidTether 也不自己加路由去蓋過它，VPN 的流量不會從手機明文出去。
 - 用暫存值寫入，程式異常結束時系統會自動清掉，幾秒內就回到 Wi-Fi。
 - Mac 這端用 `feth` 虛擬乙太網卡，Network.framework 認得它是有線網路，Tailscale 照常運作。
 - DNS 預設用手機提供的，也可以自訂。有些工具說 Android 的 USB 網路共用不轉發 DNS，一律改用公共 DNS。在 POCO F8 Ultra（HyperOS）上實測，手機自己的 DNS 透過 USB 可以正常回應：關掉 Wi-Fi 直接問手機，不到 100 ms 就有答案，即時測試每次也會直接問一次。其他手機不一定一樣，所以 DroidTether 會先問手機，沒回應才改用 8.8.8.8、8.8.4.4，之後每分鐘再問一次手機，有回應就切回來。
@@ -201,7 +208,7 @@ DroidTether 的做法：
 - 選單列面板：連線狀態、IP 與 DNS、最近 2 分鐘的流量圖，以及兩種 Ping：「手機」是 USB 線路本身的延遲，「網路」是經過手機連到 1.1.1.1 的延遲。
 - 暫停、恢復、重新連線。
 - 設定：是否設為主要連線、DNS 來源、連線時關閉 Wi-Fi、登入時開啟。
-- 連線時關閉 Wi-Fi（預設關閉）：連上手機後關掉 Wi-Fi，拔線、手機關掉分享、暫停或結束時再打開。只會打開 DroidTether 自己關掉的 Wi-Fi：接上前就是關的、或連線中你自己打開的，都不會去動。
+- 連線時關閉 Wi-Fi（預設關閉）：連上手機後關掉 Wi-Fi，拔線、手機關掉分享、暫停或結束時再打開。只會打開 DroidTether 自己關掉的 Wi-Fi：接上前就是關的、或連線中你自己打開的，都不會去動。背景服務停掉又起不來時，選單列 App 等 10 秒後會把這個 Wi-Fi 打開。
 - 手機接上但沒開分享、或被其他程式占用時，會直接提示。
 - 介面有繁體中文和英文，跟著系統語言切換。
 - 背景服務用 `SMAppService` 註冊，在系統設定開一個開關就好，不用跑安裝程式，也不用輸入密碼。
