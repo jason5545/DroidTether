@@ -5,6 +5,7 @@ struct SettingsView: View {
     @ObservedObject var model: TetherModel
     @State private var customDNS = ""
     @State private var dnsError = false
+    @State private var apn = "internet"
 
     private var config: DaemonStatus.Config? { model.status?.config }
 
@@ -75,6 +76,35 @@ struct SettingsView: View {
             }
 
             Section {
+                HStack {
+                    TextField("APN", text: $apn)
+                        .onSubmit(applyAPN)
+                    Button("Apply", action: applyAPN)
+                        .disabled(!apnValid || apn == (config?.apn ?? "internet"))
+                }
+                Toggle(isOn: Binding(
+                    get: { config?.ipv6 ?? true },
+                    set: { model.setIPv6($0) })) {
+                    Text("IPv6")
+                    Text("Ask the network for an IPv6 address as well. Turn off if your carrier refuses the connection.")
+                }
+                .disabled(config?.ipv6 == nil)
+                if model.status?.simPinSaved == true {
+                    LabeledContent("SIM PIN") {
+                        HStack {
+                            Text("Saved")
+                            Button("Forget") { model.forgetSIMPIN() }
+                        }
+                    }
+                }
+            } header: {
+                Text("4G/5G modem")
+            } footer: {
+                Text("The APN comes from your carrier; Taiwanese carriers use “internet”. Changing these reconnects the modem.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 LabeledContent("App", value: model.appVersion)
                 LabeledContent("Background service", value: model.status?.version ?? "—")
                 Button("Open Log") { model.openLog() }
@@ -85,10 +115,25 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 440)
         .fixedSize(horizontal: false, vertical: true)
-        .onAppear { customDNS = config?.dnsServers.joined(separator: ", ") ?? "" }
+        .onAppear {
+            customDNS = config?.dnsServers.joined(separator: ", ") ?? ""
+            apn = config?.apn ?? "internet"
+        }
+        .onChange(of: config?.apn ?? "") { _, value in
+            if !value.isEmpty { apn = value }
+        }
         .onChange(of: config?.dnsServers ?? []) { _, servers in
             if !servers.isEmpty { customDNS = servers.joined(separator: ", ") }
         }
+    }
+
+    private var apnValid: Bool {
+        (1...63).contains(apn.count) && apn.allSatisfy { $0.isASCII && !$0.isWhitespace && $0.asciiValue.map { $0 > 0x20 && $0 < 0x7f } == true }
+    }
+
+    private func applyAPN() {
+        guard apnValid else { return }
+        model.setAPN(apn)
     }
 
     private func parsedDNS() -> [String]? {

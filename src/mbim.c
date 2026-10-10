@@ -109,6 +109,23 @@ int mbim_info_ip_config_query(uint8_t *p, int cap, uint32_t session) {
     return 60;
 }
 
+// MBIM_SET_PIN：PinType, PinOperation, Pin(offset,size), NewPin(offset,size)，後面接 UTF-16LE 的 PIN。
+int mbim_info_pin_enter(uint8_t *p, int cap, const char *pin) {
+    size_t n = pin ? strlen(pin) : 0;
+    if (n < 4 || n > 8) return -1;
+    for (size_t i = 0; i < n; i++)
+        if (pin[i] < '0' || pin[i] > '9') return -1;
+    int len = 24 + (int)((n * 2 + 3) & ~(size_t)3);
+    if (len > cap) return -1;
+    memset(p, 0, (size_t)len);
+    put_le32(p, MBIM_PIN_TYPE_PIN1);
+    put_le32(p + 4, 0);  // enter
+    put_le32(p + 8, 24);
+    put_le32(p + 12, (uint32_t)(n * 2));
+    for (size_t i = 0; i < n; i++) p[24 + 2 * i] = (uint8_t)pin[i];
+    return len;
+}
+
 // ---------- 訊息解析 ----------
 
 int mbim_parse(const uint8_t *buf, int len, mbim_msg_t *m) {
@@ -254,6 +271,115 @@ int mbim_parse_ip_config(const uint8_t *p, uint32_t n, mbim_ipv4_t *out) {
     return out->ip ? 0 : -1;
 }
 
+int mbim_parse_ip6_config(const uint8_t *p, uint32_t n, mbim_ipv6_t *out) {
+    memset(out, 0, sizeof *out);
+    if (n < 60) return -1;
+    uint32_t avail = get_le32(p + 8);
+    uint32_t naddr = get_le32(p + 20), addr_off = get_le32(p + 24);
+    uint32_t gw_off = get_le32(p + 32);
+    uint32_t ndns = get_le32(p + 44), dns_off = get_le32(p + 48);
+    if (!(avail & 1) || !naddr) return -1;
+    // 每筆是 OnLinkPrefixLength(4) + IPv6Address(16)，用第一筆
+    if (addr_off < 60 || addr_off > n || n - addr_off < 20) return -1;
+    out->prefix = (int)get_le32(p + addr_off);
+    memcpy(out->addr, p + addr_off + 4, 16);
+    if (avail & 2) {
+        if (gw_off < 60 || gw_off > n || n - gw_off < 16) return -1;
+        memcpy(out->gw, p + gw_off, 16);
+        out->has_gw = true;
+    }
+    if ((avail & 4) && ndns) {
+        if (dns_off < 60 || dns_off > n || (n - dns_off) / 16 < ndns) return -1;
+        for (uint32_t i = 0; i < ndns && out->ndns < 2; i++) memcpy(out->dns[out->ndns++], p + dns_off + 16 * i, 16);
+    }
+    if (avail & 8) out->mtu = get_le32(p + 56);
+    if (out->prefix <= 0 || out->prefix > 128) out->prefix = 64;
+    return 0;
+}
+
+int mbim_parse_pin_info(const uint8_t *p, uint32_t n, uint32_t *type, uint32_t *state, uint32_t *attempts) {
+    if (n < 12) return -1;
+    *type = get_le32(p);
+    *state = get_le32(p + 4);
+    *attempts = get_le32(p + 8);
+    return 0;
+}
+
+int mbim_parse_signal(const uint8_t *p, uint32_t n, uint32_t *rssi, uint32_t *error_rate) {
+    if (n < 8) return -1;
+    *rssi = get_le32(p);
+    *error_rate = get_le32(p + 4);
+    return 0;
+}
+
+int mbim_signal_bars(uint32_t rssi) {
+    if (rssi > 31) return -1;
+    if (rssi >= 20) return 4;  // -73 dBm 以上
+    if (rssi >= 15) return 3;  // -83
+    if (rssi >= 10) return 2;  // -93
+    if (rssi >= 5) return 1;   // -103
+    return 0;
+}
+
+// UTF-16LE 字串（offset、size 指向 p 裡面）轉 UTF-8。
+static int utf16_to_utf8(const uint8_t *p, uint32_t n, uint32_t off, uint32_t size, char *out, int cap) {
+    if (cap < 1) return -1;
+    out[0] = '\0';
+    if (!size) return 0;
+    if (off > n || size > n - off || (size & 1)) return -1;
+    int o = 0;
+    for (uint32_t i = 0; i + 1 < size; i += 2) {
+        uint32_t c = get_le16(p + off + i);
+        if (c >= 0xD800 && c < 0xDC00 && i + 3 < size) {
+            uint32_t lo = get_le16(p + off + i + 2);
+            if (lo >= 0xDC00 && lo < 0xE000) {
+                c = 0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00);
+                i += 2;
+            }
+        }
+        if (!c) break;
+        uint8_t b[4];
+        int k = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+        if (k == 1) {
+            b[0] = (uint8_t)c;
+        } else {
+            static const uint8_t lead[5] = {0, 0, 0xC0, 0xE0, 0xF0};
+            for (int j = k - 1; j > 0; j--) {
+                b[j] = (uint8_t)(0x80 | (c & 0x3F));
+                c >>= 6;
+            }
+            b[0] = (uint8_t)(lead[k] | c);
+        }
+        if (o + k >= cap) break;
+        memcpy(out + o, b, (size_t)k);
+        o += k;
+    }
+    out[o] = '\0';
+    return o;
+}
+
+// MBIM_REGISTRATION_STATE_INFO：..., ProviderId(20/24), ProviderName(28/32), RoamingText(36/40), RegistrationFlag(44)
+int mbim_parse_provider_name(const uint8_t *p, uint32_t n, char *out, int cap) {
+    if (n < 48) return -1;
+    return utf16_to_utf8(p, n, get_le32(p + 28), get_le32(p + 32), out, cap) < 0 ? -1 : 0;
+}
+
+int mbim_parse_data_class(const uint8_t *p, uint32_t n, uint32_t *cls) {
+    if (n < 12) return -1;
+    *cls = get_le32(p + 8);
+    return 0;
+}
+
+// 0x40、0x80 是 Microsoft 擴充定義的 5G NSA、5G SA
+const char *mbim_data_class_name(uint32_t cls) {
+    if (cls & 0x80) return "5G SA";
+    if (cls & 0x40) return "5G";
+    if (cls & 0x20) return "LTE";
+    if (cls & 0x1C) return "3G";
+    if (cls & 0x03) return "2G";
+    return "";
+}
+
 uint32_t mbim_netmask(uint32_t ip, uint32_t gw, int prefix) {
     if (prefix <= 0 || prefix > 32) prefix = 32;
     uint32_t a = ntohl(ip), b = ntohl(gw);
@@ -349,10 +475,67 @@ int ntb16_parse(const uint8_t *buf, int len, ntb_dgram_cb cb, void *ctx) {
 
 // ---------- 系統端的乙太網路 ----------
 
-int l2_from_host(const uint8_t *f, int len, uint32_t host_ip, const uint8_t gw_mac[6], uint8_t *reply, int *reply_len,
-                 const uint8_t **ip, int *ip_len) {
+// ICMPv6 checksum：IPv6 pseudo header（來源、目的、長度、next header 58）加上整個 ICMPv6 訊息。
+static uint16_t icmp6_checksum(const uint8_t src[16], const uint8_t dst[16], const uint8_t *msg, int len) {
+    uint32_t sum = 0;
+    for (int i = 0; i < 16; i += 2) sum += (uint32_t)get_be16(src + i) + get_be16(dst + i);
+    sum += (uint32_t)len + 58;
+    return ip_checksum(msg, len, sum);
+}
+
+static bool ip6_unspecified(const uint8_t a[16]) {
+    static const uint8_t zero[16];
+    return memcmp(a, zero, 16) == 0;
+}
+
+// IPv6：替這條線上的鄰居（閘道和子網路裡其他位址）回 Neighbor Advertisement，其他要送出去的交給呼叫的人。
+static int l2_from_host6(const uint8_t *f, int len, const uint8_t *host_ip6, const uint8_t gw_mac[6], uint8_t *reply,
+                         int *reply_len, const uint8_t **ip, int *ip_len) {
+    if (!host_ip6 || len < 14 + 40) return 0;
+    const uint8_t *h = f + 14;
+    if ((h[0] >> 4) != 6) return 0;
+    int plen = get_be16(h + 4);
+    if (plen > len - 14 - 40) return 0;
+    const uint8_t *src = h + 8, *dst = h + 24;
+    const uint8_t *icmp = h + 40;
+    if (h[6] == 58 && plen >= 24 && icmp[0] == 135) {
+        const uint8_t *target = icmp + 8;
+        // 系統自己的重複位址偵測（來源是 ::）、問自己的位址：不能回，否則會被當成位址衝突
+        if (ip6_unspecified(src) || memcmp(target, host_ip6, 16) == 0) return 0;
+        uint8_t *e = reply, *r = reply + 14, *na = reply + 14 + 40;
+        memcpy(e, f + 6, 6);  // 回給發問的人
+        memcpy(e + 6, gw_mac, 6);
+        put_be16(e + 12, 0x86DD);
+        memset(r, 0, 40);
+        r[0] = 0x60;
+        put_be16(r + 4, 32);
+        r[6] = 58;
+        r[7] = 255;
+        memcpy(r + 8, target, 16);
+        memcpy(r + 24, src, 16);
+        memset(na, 0, 32);
+        na[0] = 136;
+        na[4] = 0x60;  // Solicited + Override（這條線上只有我們，路由器旗標交給 configd 的設定）
+        memcpy(na + 8, target, 16);
+        na[24] = 2;  // Target Link-Layer Address
+        na[25] = 1;
+        memcpy(na + 26, gw_mac, 6);
+        put_be16(na + 2, icmp6_checksum(r + 8, r + 24, na, 32));
+        *reply_len = 14 + 40 + 32;
+        return 1;
+    }
+    // link-local 來源、多播目的地（ND、MLD、mDNS）只屬於這條線，不送進行動網路
+    if ((src[0] == 0xfe && (src[1] & 0xc0) == 0x80) || dst[0] == 0xff || ip6_unspecified(src)) return 0;
+    *ip = h;
+    *ip_len = 40 + plen;
+    return 2;
+}
+
+int l2_from_host(const uint8_t *f, int len, uint32_t host_ip, const uint8_t *host_ip6, const uint8_t gw_mac[6],
+                 uint8_t *reply, int *reply_len, const uint8_t **ip, int *ip_len) {
     if (len < 14) return 0;
     uint16_t type = get_be16(f + 12);
+    if (type == 0x86DD) return l2_from_host6(f, len, host_ip6, gw_mac, reply, reply_len, ip, ip_len);
     if (type == 0x0800) {
         if (len < 14 + 20) return 0;
         int total = get_be16(f + 16);
@@ -388,10 +571,11 @@ int l2_from_host(const uint8_t *f, int len, uint32_t host_ip, const uint8_t gw_m
 }
 
 int l2_to_host(uint8_t *frame, int cap, const uint8_t *ip, int len, const uint8_t host_mac[6], const uint8_t gw_mac[6]) {
-    if (len < 20 || (ip[0] >> 4) != 4 || len + 14 > cap) return 0;
+    int v = len >= 1 ? ip[0] >> 4 : 0;
+    if ((v == 4 && len < 20) || (v == 6 && len < 40) || (v != 4 && v != 6) || len + 14 > cap) return 0;
     memcpy(frame, host_mac, 6);
     memcpy(frame + 6, gw_mac, 6);
-    put_be16(frame + 12, 0x0800);
+    put_be16(frame + 12, v == 6 ? 0x86DD : 0x0800);
     memcpy(frame + 14, ip, (size_t)len);
     return len + 14;
 }
@@ -666,10 +850,62 @@ static int bc(mbim_dev_t *s, uint32_t cid, bool set, const uint8_t *info, int il
     return mbim_dev_command(s, cid, set, info, ilen, out, cap, st, timeout_ms);
 }
 
-const char *mbim_connect(mbim_dev_t *s, const char *apn, mbim_ipv4_t *ipc) {
+// SIM 鎖著：有存 PIN 而且這次還沒試過才試一次，被拒就回報，絕不重試（錯三次會鎖成要 PUK）。
+static const char *unlock_sim(mbim_dev_t *s, mbim_connect_opts_t *o) {
+    uint8_t out[512], info[64];
+    uint32_t st = 0, type = 0, state = 0, att = 0xFFFFFFFFu;
+    int n = bc(s, MBIM_CID_PIN, false, NULL, 0, out, sizeof out, &st, CMD_TIMEOUT_MS);
+    if (n < 0 || mbim_parse_pin_info(out, (uint32_t)n, &type, &state, &att) != 0) return "sim_locked";
+    o->pin_attempts = att > 99 ? -1 : (int)att;
+    if (type == MBIM_PIN_TYPE_PUK1) return "sim_puk";
+    if (type != MBIM_PIN_TYPE_PIN1 || state != MBIM_PIN_STATE_LOCKED) return "sim_locked";
+    if (!o->pin || !o->pin[0] || o->pin_used) return "sim_pin_required";
+    int il = mbim_info_pin_enter(info, sizeof info, o->pin);
+    if (il < 0) {
+        o->pin_rejected = true;  // 格式就不對，不送
+        return "sim_pin_wrong";
+    }
+    o->pin_used = true;
+    LOGI("entering the SIM PIN (%d attempts left)", o->pin_attempts);
+    n = bc(s, MBIM_CID_PIN, true, info, il, out, sizeof out, &st, CMD_TIMEOUT_MS);
+    if (n >= 0 && mbim_parse_pin_info(out, (uint32_t)n, &type, &state, &att) == 0) o->pin_attempts = att > 99 ? -1 : (int)att;
+    if (n < 0 || st != 0) {
+        o->pin_rejected = true;
+        LOGE("SIM PIN rejected (%s, %d attempts left); it will not be tried again", mbim_status_name(st), o->pin_attempts);
+        return "sim_pin_wrong";
+    }
+    LOGI("SIM unlocked");
+    return NULL;
+}
+
+static const char *dial(mbim_dev_t *s, const char *apn, uint32_t ip_type, uint32_t *st_out) {
+    uint8_t out[512], info[256];
+    uint32_t st = 0;
+    mbim_connect_info_t c;
+    int il = mbim_info_connect_set(info, sizeof info, 0, true, apn, ip_type);
+    if (il < 0) return "connect_failed";
+    LOGI("connecting (apn %s, %s)", apn, ip_type == MBIM_IP_TYPE_IPV4V6 ? "IPv4v6" : "IPv4");
+    int n = bc(s, MBIM_CID_CONNECT, true, info, il, out, sizeof out, &st, CONNECT_TIMEOUT_MS);
+    *st_out = st;
+    if (n < 0) return "mbim_failed";
+    bool parsed = mbim_parse_connect(out, (uint32_t)n, &c) == 0;
+    if (st != 0 || !parsed || c.activation != MBIM_ACT_ACTIVATED) {
+        if (parsed && st == 0)
+            LOGE("connect failed: activation state %u, network error %u", c.activation, c.nw_error);
+        else
+            LOGE("connect failed: %s (status %u)", mbim_status_name(st), st);
+        return "connect_failed";
+    }
+    return NULL;
+}
+
+const char *mbim_connect(mbim_dev_t *s, mbim_connect_opts_t *o, mbim_ipv4_t *ipc, mbim_ipv6_t *ip6) {
     uint8_t out[4096], info[256];
     uint32_t st = 0;
     int n;
+    o->pin_attempts = -1;
+    memset(ip6, 0, sizeof *ip6);
+    bool unlocked = false;  // PIN 剛輸入成功，SIM 可能還要一下子才就緒，不要再試一次
 
     for (int i = 0;; i++) {
         uint32_t ready = 0;
@@ -678,10 +914,18 @@ const char *mbim_connect(mbim_dev_t *s, const char *apn, mbim_ipv4_t *ipc) {
         if (mbim_parse_subscriber_ready(out, (uint32_t)n, &ready) == 0) {
             if (ready == MBIM_SIM_INITIALIZED) break;
             if (ready == MBIM_SIM_NOT_INSERTED) return "sim_missing";
-            if (ready == MBIM_SIM_LOCKED) return "sim_locked";
+            if (ready == MBIM_SIM_LOCKED && !unlocked) {
+                const char *e = unlock_sim(s, o);
+                if (e) return e;
+                unlocked = true;
+            }
             if (ready == MBIM_SIM_BAD || ready == MBIM_SIM_FAILURE || ready == MBIM_SIM_NOT_ACTIVATED) return "sim_failed";
         } else if (st == 3) {
             return "sim_missing";  // MBIM_STATUS_SIM_NOT_INSERTED
+        } else if (st == 5 && !unlocked) {  // MBIM_STATUS_PIN_REQUIRED
+            const char *e = unlock_sim(s, o);
+            if (e) return e;
+            unlocked = true;
         }
         if (i >= 30) return "sim_failed";
         sleep_s(1);
@@ -736,16 +980,12 @@ const char *mbim_connect(mbim_dev_t *s, const char *apn, mbim_ipv4_t *ipc) {
         sleep_s(1);
     }
 
-    il = mbim_info_connect_set(info, sizeof info, 0, true, apn, MBIM_IP_TYPE_IPV4);
-    if (il < 0) return "connect_failed";
-    LOGI("connecting (apn %s)", apn);
-    n = bc(s, MBIM_CID_CONNECT, true, info, il, out, sizeof out, &st, CONNECT_TIMEOUT_MS);
-    if (n < 0) return "mbim_failed";
-    if (st != 0 || mbim_parse_connect(out, (uint32_t)n, &c) != 0 || c.activation != MBIM_ACT_ACTIVATED) {
-        LOGE("connect failed: %s (status %u, activation %u, nw error %u)", mbim_status_name(st), st,
-             n >= 36 ? c.activation : 0, n >= 36 ? c.nw_error : 0);
-        return "connect_failed";
+    const char *e = dial(s, o->apn, o->ipv6 ? MBIM_IP_TYPE_IPV4V6 : MBIM_IP_TYPE_IPV4, &st);
+    if (e && o->ipv6 && strcmp(e, "connect_failed") == 0) {
+        LOGW("IPv4v6 refused; trying IPv4 only");
+        e = dial(s, o->apn, MBIM_IP_TYPE_IPV4, &st);
     }
+    if (e) return e;
 
     il = mbim_info_ip_config_query(info, sizeof info, 0);
     n = bc(s, MBIM_CID_IP_CONFIGURATION, false, info, il, out, sizeof out, &st, CMD_TIMEOUT_MS);
@@ -753,7 +993,44 @@ const char *mbim_connect(mbim_dev_t *s, const char *apn, mbim_ipv4_t *ipc) {
         LOGE("modem did not report an IPv4 address");
         return "connect_failed";
     }
+    mbim_parse_ip6_config(out, (uint32_t)n, ip6);
     return NULL;
+}
+
+int mbim_query_custom_class(mbim_dev_t *s, char *out, int cap) {
+    uint8_t buf[2048];
+    uint32_t st = 0;
+    out[0] = '\0';
+    int n = bc(s, MBIM_CID_DEVICE_CAPS, false, NULL, 0, buf, sizeof buf, &st, CMD_TIMEOUT_MS);
+    // MBIM_DEVICE_CAPS_INFO：..., CustomDataClass(offset 32, size 36), DeviceId, ...（DeviceId 是 IMEI，不讀）
+    if (n < 64 || st != 0) return -1;
+    return utf16_to_utf8(buf, (uint32_t)n, get_le32(buf + 32), get_le32(buf + 36), out, cap) < 0 ? -1 : 0;
+}
+
+const char *mbim_tech_name(uint32_t data_class, const char *custom) {
+    const char *t = mbim_data_class_name(data_class);
+    if (!*t && (data_class & 0x80000000u) && custom && strncmp(custom, "5G", 2) == 0) return "5G";
+    return t;
+}
+
+int mbim_query_link(mbim_dev_t *s, mbim_link_t *l) {
+    uint8_t out[1024];
+    uint32_t st = 0, a = 0, b = 0;
+    int ok = 0, n;
+    l->rssi = l->bars = -1;
+    l->provider[0] = '\0';
+    l->data_class = 0;
+    n = bc(s, MBIM_CID_SIGNAL_STATE, false, NULL, 0, out, sizeof out, &st, CMD_TIMEOUT_MS);
+    if (n >= 0 && st == 0 && mbim_parse_signal(out, (uint32_t)n, &a, &b) == 0) {
+        l->bars = mbim_signal_bars(a);
+        l->rssi = l->bars < 0 ? -1 : (int)a;
+        ok++;
+    }
+    n = bc(s, MBIM_CID_REGISTER_STATE, false, NULL, 0, out, sizeof out, &st, CMD_TIMEOUT_MS);
+    if (n >= 0 && st == 0 && mbim_parse_provider_name(out, (uint32_t)n, l->provider, sizeof l->provider) == 0) ok++;
+    n = bc(s, MBIM_CID_PACKET_SERVICE, false, NULL, 0, out, sizeof out, &st, CMD_TIMEOUT_MS);
+    if (n >= 0 && st == 0 && mbim_parse_data_class(out, (uint32_t)n, &l->data_class) == 0) ok++;
+    return ok ? 0 : -1;
 }
 
 void mbim_disconnect(mbim_dev_t *d) {

@@ -134,15 +134,21 @@ def resolvers_in_front():
     return names
 
 
-def check_default_resolver(label, dns):
+def check_default_resolver(label, dns, dns6=None):
     """Invariant 2. Strict when nothing sits in front of our resolver. When something does, say what, so a pass
-    never claims ordinary names go to the daemon's DNS while mDNSResponder actually asks Tailscale first."""
+    never claims ordinary names go to the daemon's DNS while mDNSResponder actually asks Tailscale first.
+    IPv4 servers must match in order; IPv6 servers (modems only, reported as dns6) as a set, since configd
+    puts them first."""
+    if dns6 is None:
+        dns6 = (status() or {}).get("dns6", [])
     dr, front = default_resolver(), resolvers_in_front()
     if front:
         name = f"DNS goes through {', '.join(front)} first, not daemon DNS; the system resolver behind it = daemon DNS"
     else:
         name = "default resolver = daemon DNS"
-    return check(f"{label}: {name}", dr == dns, f"resolver {dr}, daemon {dns}")
+    v4 = [a for a in dr if ":" not in a]
+    v6 = sorted(a for a in dr if ":" in a)
+    return check(f"{label}: {name}", v4 == dns and v6 == sorted(dns6), f"resolver {dr}, daemon {dns + list(dns6)}")
 
 
 def all_resolver_text():

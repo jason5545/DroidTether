@@ -5,6 +5,9 @@
 //   set dns phone|IP[,IP...]   DNS 來源
 //   set wifi_off 0|1           連線時關掉 Wi-Fi（不用重連）
 //   set apn NAME               MBIM 數據機撥號用的 APN
+//   set ipv6 0|1               MBIM 數據機要不要 IPv6
+//   sim pin NNNN               存下 SIM PIN 並重新連線（只會試一次，被拒就刪掉）
+//   sim forget-pin             刪掉存著的 SIM PIN
 //   reconnect                  斷開重連
 //   quit                       結束行程（launchd 會重新啟動，用在 App 更新後換新版 daemon）
 
@@ -77,7 +80,31 @@ static void status_json(sbuf *b) {
         sb_add(b, ",\"netmask\":\"%s\",\"dns\":", ip_str(g_st.mask, t));
         sb_ips(b, g_st.dns, g_st.ndns);
         sb_add(b, ",\"dns_fallback\":%s", g_st.dns_fallback ? "true" : "false");
+        if (g_st.ipv6[0]) {
+            sb_add(b, ",\"ipv6\":");
+            sb_str(b, g_st.ipv6);
+            sb_add(b, ",\"dns6\":[");
+            for (int i = 0; i < g_st.ndns6; i++) {
+                if (i) sb_add(b, ",");
+                sb_str(b, g_st.dns6[i]);
+            }
+            sb_add(b, "]");
+        }
     }
+    sb_add(b, ",\"kind\":\"%s\"", g_st.modem ? "modem" : "phone");
+    if (g_st.modem) {
+        if (g_st.signal_bars >= 0) sb_add(b, ",\"signal_bars\":%d,\"signal_dbm\":%d", g_st.signal_bars, g_st.signal_dbm);
+        if (g_st.carrier[0]) {
+            sb_add(b, ",\"carrier\":");
+            sb_str(b, g_st.carrier);
+        }
+        if (g_st.tech[0]) {
+            sb_add(b, ",\"tech\":");
+            sb_str(b, g_st.tech);
+        }
+        if (g_st.pin_attempts >= 0) sb_add(b, ",\"pin_attempts\":%d", g_st.pin_attempts);
+    }
+    sb_add(b, ",\"sim_pin_saved\":%s", sim_pin_saved() ? "true" : "false");
     sb_add(b, ",\"rx_bytes\":%lu,\"tx_bytes\":%lu", (unsigned long)g_rx_bytes, (unsigned long)g_tx_bytes);
     sb_add(b, ",\"config\":{\"enabled\":%s,\"primary\":%s,\"wifi_off\":%s,\"dns_mode\":\"%s\",\"dns_servers\":",
            g_cfg.enabled ? "true" : "false", g_cfg.primary ? "true" : "false", g_cfg.wifi_off ? "true" : "false",
@@ -85,7 +112,7 @@ static void status_json(sbuf *b) {
     sb_ips(b, g_cfg.dns, g_cfg.dns_from_phone ? 0 : g_cfg.ndns);
     sb_add(b, ",\"apn\":");
     sb_str(b, g_cfg.apn);
-    sb_add(b, "}}");
+    sb_add(b, ",\"ipv6\":%s}}", g_cfg.ipv6 ? "true" : "false");
     pthread_mutex_unlock(&g_state_lock);
 }
 
@@ -109,6 +136,21 @@ static void handle(char *line, sbuf *out) {
         LOGI("control: reconnect");
         g_reset = true;
         sb_add(out, "{\"ok\":true}");
+        return;
+    }
+    if (strcmp(cmd, "sim") == 0 && key) {
+        // PIN 不寫進 log
+        if (strcmp(key, "pin") == 0 && val && sim_pin_valid(val) && sim_pin_save(val) == 0) {
+            LOGI("control: SIM PIN saved; reconnecting to use it");
+            g_reset = true;
+            status_json(out);
+        } else if (strcmp(key, "forget-pin") == 0) {
+            LOGI("control: SIM PIN forgotten");
+            sim_pin_forget();
+            status_json(out);
+        } else {
+            sb_add(out, "{\"ok\":false,\"error\":\"invalid_value\"}");
+        }
         return;
     }
     if (strcmp(cmd, "quit") == 0) {
@@ -162,6 +204,7 @@ static void handle(char *line, sbuf *out) {
         else if (strcmp(key, "wifi_off") == 0) g_cfg.wifi_off = strcmp(val, "0") != 0;
         else if (strcmp(key, "dns") == 0) ok = config_parse_dns(val, &g_cfg) == 0;
         else if (strcmp(key, "apn") == 0) ok = config_valid_apn(val) && strlcpy(g_cfg.apn, val, sizeof g_cfg.apn);
+        else if (strcmp(key, "ipv6") == 0) g_cfg.ipv6 = strcmp(val, "0") != 0;
         else ok = false;
         pthread_mutex_unlock(&g_state_lock);
         if (ok) {

@@ -1,5 +1,7 @@
 #include "feth.h"
 
+#include <arpa/inet.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <net/bpf.h>
@@ -115,6 +117,14 @@ int feth_create(feth_t *f, const uint8_t mac[6], int mtu) {
 int feth_set_ipv4(feth_t *f, uint32_t ip, uint32_t mask) {
     char a[16], b[16];
     const char *argv[] = {"/sbin/ifconfig", f->host, "inet", ip_str(ip, a), "netmask", ip_str(mask, b), NULL};
+    return ifconfig(argv);
+}
+
+int feth_set_ipv6(feth_t *f, const uint8_t addr[16], int prefix) {
+    char a[64], p[8];
+    inet_ntop(AF_INET6, addr, a, sizeof a);
+    snprintf(p, sizeof p, "%d", prefix);
+    const char *argv[] = {"/sbin/ifconfig", f->host, "inet6", a, "prefixlen", p, "alias", NULL};
     return ifconfig(argv);
 }
 

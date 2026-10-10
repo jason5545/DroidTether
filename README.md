@@ -34,12 +34,14 @@ USB modems are the other half. Many can switch to ECM, which macOS supports, but
 
 Tetherline speaks MBIM itself: it opens the modem's control channel, waits for the SIM and network registration, dials with an APN (default `internet`), reads the address the network assigns, and carries IP packets in NTB16 blocks. The Mac side is the same `feth` pair, with the Ethernet headers and ARP replies made up by the daemon, so DNS, the VPN behaviour, Wi-Fi handling and the panel all work the same way. When a modem says it is connected but nothing comes back (some firmware does this every few hours), the daemon notices from unanswered pings while idle and resets the modem over USB.
 
-Tested with a TCL LINKKEY IK512 (Qualcomm SDX62) on Taiwan Mobile, on macOS 26: plugged in, the Mac is online about 3 seconds later, with the carrier's DNS, and the live DNS test (14/14) and VPN test (26/26) pass over the modem. Every request the daemon builds also matches libmbim byte for byte. This modem ignores the MBIM open request until the host has set its NTB input size, which Linux always does while binding, so the daemon does it too.
+The panel shows the carrier, the network type and the signal as bars. IPv6 works alongside IPv4 when the network offers it (Taiwan Mobile does): the daemon answers neighbor discovery for the modem's side of the link and registers the IPv6 address, router and DNS with `configd`. If the SIM needs its PIN, the panel asks for it once. The daemon keeps it in a file only root can read and enters it on later plug-ins, and it never tries a PIN the SIM has rejected, so a stored PIN cannot use up the attempts and lock the SIM into PUK.
+
+Tested with a TCL LINKKEY IK512 (Qualcomm SDX62) on Taiwan Mobile, on macOS 26: plugged in, the Mac is online about 3 seconds later, with the carrier's DNS, and the live DNS test (14/14) and VPN test (26/26) pass over the modem. IPv6 gets a global address from the carrier, and `ping6` and HTTPS over IPv6 work. Every request the daemon builds also matches libmbim byte for byte. This modem ignores the MBIM open request until the host has set its NTB input size, which Linux always does while binding, so the daemon does it too.
 
 ## Features
 
 - Enable USB tethering on the phone and the Mac is online about a second later. Unplug and Wi-Fi comes back.
-- 4G/5G USB modems in MBIM mode: plug in and the Mac dials with the configured APN.
+- 4G/5G USB modems in MBIM mode: plug in and the Mac dials with the configured APN, over IPv4 and IPv6, with the carrier, network type and signal bars in the panel, and SIM PIN entry when needed.
 - Menu bar panel: status, IP and DNS, a two-minute traffic graph, and ping to the phone (the USB link) and to 1.1.1.1 (through the phone).
 - Pause, resume and reconnect.
 - Settings: use the phone as the main connection or not, DNS (from the phone or custom), turn Wi-Fi off while connected, open at login.
@@ -77,7 +79,7 @@ Tetherline.app (menu bar) ⇄ /var/run/droidtetherd.sock ⇄ droidtetherd
 
 - macOS 26 or later on Apple Silicon. That is what it is built for and tested on (deployment target 26.0, arm64).
 - An Android phone that tethers over RNDIS (USB interface class `EF/04/01`, `E0/01/03` or `02/02/FF`). Tested with a POCO F8 Ultra on HyperOS.
-- Or a USB modem in MBIM mode (interface class `02/0E/00`) with a SIM that does not need a PIN. Tested with a TCL LINKKEY IK512.
+- Or a USB modem in MBIM mode (interface class `02/0E/00`). Tested with a TCL LINKKEY IK512.
 - To build: the Xcode command line tools (Swift 6), `libusb` from Homebrew, and an Apple Development code-signing identity. I have only tested the `SMAppService` background service with a properly signed app.
 
 ## Download
@@ -103,7 +105,7 @@ On first launch, macOS asks you to allow the background item. Turn on **Tetherli
 
 - Turn on USB tethering on the phone. If your ROM keeps the AOSP developer option **Default USB configuration**, setting it to *USB tethering* skips this step every time you plug in.
 - Click the menu bar icon for the panel. The gear opens Settings. Opening Tetherline again from Applications or Spotlight also brings up Settings.
-- **Modems** dial with the APN `internet` unless told otherwise; it is what the Taiwanese carriers use. To change it: `echo 'set apn YOUR.APN' | nc -U /var/run/droidtetherd.sock`. There is no field for it in Settings yet.
+- **Modems** dial with the APN `internet` unless told otherwise; it is what the Taiwanese carriers use. Settings → 4G/5G modem has the APN, an IPv6 switch (on by default; if the network refuses IPv4v6 the daemon falls back to IPv4 by itself) and, once a PIN has been entered, a button to forget it.
 - **Use as the main connection** (on by default) sends all traffic and DNS through the phone. Turn it off to keep Wi-Fi primary and leave the tether available as a secondary interface.
 - **Turn off Wi-Fi while connected** (off by default) switches Wi-Fi off once the tether is up, and back on when you unplug the phone, turn tethering off on the phone, pause, or quit. Only Wi-Fi that Tetherline switched off comes back on: if it was already off when you plugged in, or you turn it back on yourself while connected, Tetherline leaves it alone. It works only while the phone is the main connection. Wi-Fi usually rejoins within a couple of seconds after you unplug; until then the Mac has no connection. If the background service stops and launchd cannot start it again (for example after switching between differently signed copies, see Troubleshooting), the menu bar app turns that Wi-Fi back on after 10 seconds.
 - **With Tailscale's "Use Tailscale DNS" on**, Tailscale can handle DNS first. On the test machine (tailnet global nameservers 8.8.8.8 and 8.8.4.4), macOS sent ordinary names to 100.100.100.100 rather than to the phone, even with Tetherline as the main connection. Tetherline's DNS setting then only matters for queries that reach the system resolvers; traffic, including Tailscale's own DNS forwarding, still goes through the phone. In `scutil --dns` this shows up as a Tailscale resolver with no `domain` and a lower `order` than Tetherline's.
@@ -115,8 +117,9 @@ On first launch, macOS asks you to allow the background item. Turn on **Tetherli
 | "Turn on USB tethering on the phone" | The phone is plugged in but exposes no RNDIS interface yet. |
 | "… is in use by another app" | Quit any other tethering tool that might hold the device. |
 | Connected, but names don't resolve | `scutil --dns` should list the phone's DNS as the default resolver, and `printf 'show State:/Network/Global/IPv4\n' \| scutil` should show `PrimaryService : DroidTether` (the service keeps the old name). A Tailscale resolver with no domain and a lower `order` means Tailscale answers names first (see Using it). `dig @<DNS from the panel> example.com` asks the phone directly, bypassing both. |
-| Modem: "No SIM card", "SIM card is locked", "could not register" | The modem reports this itself. Check the SIM in a phone first; PIN entry is not supported, so remove the PIN there. |
-| Modem: "refused the data connection; check the APN" | The network rejected the APN. Set the one your carrier publishes (see Using it); the log shows the MBIM status and network error code. |
+| Modem: "No SIM card", "needs its PUK", "could not register" | The modem reports this itself. Check the SIM in a phone first. A SIM that wants its PUK has to be unlocked in a phone. |
+| Modem: "The SIM card rejected the PIN" | The saved PIN was wrong and has been deleted, so it is not tried again. The panel shows how many attempts are left; enter the right PIN there. |
+| Modem: "refused the data connection; check the APN" | The network rejected the APN. Set the one your carrier publishes in Settings; the daemon tries again every 10 seconds, and the log shows the MBIM status. |
 | Ping works, websites hang | Some carriers drop large packets. Try a smaller MTU with the development build below (`--mtu 1380`). |
 | Background service never starts after switching between a self-built copy and a downloaded one | `launchctl print system/io.github.jason5545.droidtether` shows `spawn failed` and `needs LWCR update`. launchd still holds the code requirement of the first copy that registered the service. Restarting the Mac clears it. Avoid keeping several copies of Tetherline.app (or an older DroidTether.app) around: macOS may resolve the bundled daemon from the wrong one. |
 
@@ -231,12 +234,14 @@ Tetherline 的做法：
 
 Tetherline 自己處理 MBIM：開控制通道、等 SIM 和註冊、用 APN 撥號（預設 `internet`，臺灣的電信商都用這個）、讀網路配的位址，資料用 NTB16 收送。Mac 這端一樣是 `feth`，乙太網路標頭和 ARP 由 daemon 補，所以 DNS、VPN、Wi-Fi 和面板的行為都跟手機一樣。數據機有時會「顯示連著但不通」，閒置時 ping 不回來，daemon 會透過 USB 把它重置。
 
-實測：TCL LINKKEY IK512（高通 SDX62）、台灣大哥大、macOS 26。插上後大約 3 秒連上，DNS 用電信商的，透過數據機跑即時 DNS 測試 14/14、VPN 測試 26/26。daemon 組出來的每種請求也都跟 libmbim 逐位元組相同。這張網卡要主機先設定 NTB 接收大小才肯回 MBIM 的 OPEN；Linux 綁定驅動時一定會送，所以 daemon 也照做。
+面板會顯示電信商、網路制式和訊號格數。網路有給 IPv6 時（台灣大哥大有），IPv4、IPv6 都能用。SIM 卡要 PIN 時，面板會請你輸入一次；daemon 把它存在只有 root 讀得到的檔案，之後插上自動輸入。被拒絕過的 PIN 會立刻刪掉、絕不再試，所以存著的 PIN 不會把次數用完、把 SIM 鎖成要 PUK。
+
+實測：TCL LINKKEY IK512（高通 SDX62）、台灣大哥大、macOS 26。插上後大約 3 秒連上，DNS 用電信商的，透過數據機跑即時 DNS 測試 14/14、VPN 測試 26/26。IPv6 拿得到電信商配的全域位址，`ping6` 和走 IPv6 的 HTTPS 都正常。daemon 組出來的每種請求也都跟 libmbim 逐位元組相同。這張網卡要主機先設定 NTB 接收大小才肯回 MBIM 的 OPEN；Linux 綁定驅動時一定會送，所以 daemon 也照做。
 
 ### 功能
 
 - 手機打開 USB 網路共用，大約一秒就連上；拔線自動回到 Wi-Fi。
-- MBIM 模式的 4G/5G USB 數據機：插上就用設定的 APN 撥號。要改 APN：`echo 'set apn 你的APN' | nc -U /var/run/droidtetherd.sock`，設定畫面還沒有這個欄位。
+- MBIM 模式的 4G/5G USB 數據機：插上就用設定的 APN 撥號，IPv4、IPv6 都有，面板顯示電信商、網路制式和訊號格數，SIM 卡要 PIN 時可以直接輸入。APN 和 IPv6 開關在「設定 → 4G/5G 數據機」。
 - 選單列面板：連線狀態、IP 與 DNS、最近 2 分鐘的流量圖，以及兩種 Ping：「手機」是 USB 線路本身的延遲，「網路」是經過手機連到 1.1.1.1 的延遲。
 - 暫停、恢復、重新連線。
 - 設定：是否設為主要連線、DNS 來源、連線時關閉 Wi-Fi、登入時開啟。

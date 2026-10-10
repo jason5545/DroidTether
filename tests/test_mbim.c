@@ -147,7 +147,107 @@ static int fx_subscriber_done(uint8_t *b) {
     return done_msg(b, MBIM_COMMAND_DONE, 3, MBIM_CID_SUBSCRIBER_READY, 0, i, sizeof i);
 }
 
+static int put_utf16(uint8_t *p, const char *ascii) {
+    int n = 0;
+    for (; ascii[n]; n++) {
+        p[2 * n] = (uint8_t)ascii[n];
+        p[2 * n + 1] = 0;
+    }
+    return 2 * n;
+}
+
+// MBIM_PIN_INFO：PinType, PinState, RemainingAttempts
+static int fx_pin_done(uint8_t *b) {
+    uint8_t i[12];
+    put_le32(i, MBIM_PIN_TYPE_PIN1);
+    put_le32(i + 4, MBIM_PIN_STATE_LOCKED);
+    put_le32(i + 8, 3);
+    return done_msg(b, MBIM_COMMAND_DONE, 20, MBIM_CID_PIN, 0, i, sizeof i);
+}
+
+// MBIM_SIGNAL_STATE_INFO：Rssi, ErrorRate, SignalStrengthInterval, RssiThreshold, ErrorRateThreshold（IK512 在 Mac 上讀到 RSSI 14）
+static int fx_signal_done(uint8_t *b) {
+    uint8_t i[20] = {0};
+    put_le32(i, 14);
+    put_le32(i + 4, 99);
+    return done_msg(b, MBIM_COMMAND_DONE, 21, MBIM_CID_SIGNAL_STATE, 0, i, sizeof i);
+}
+
+// 有電信商名稱的 REGISTRATION_STATE：ProviderId "46697"、ProviderName "TW Mobile"
+static int fx_register_named(uint8_t *b) {
+    uint8_t i[80] = {0};
+    put_le32(i + 4, MBIM_REG_HOME);
+    put_le32(i + 8, 1);
+    put_le32(i + 12, 0x80000020);
+    put_le32(i + 16, 1);
+    int n1 = put_utf16(i + 48, "46697");
+    put_le32(i + 20, 48);
+    put_le32(i + 24, (uint32_t)n1);
+    int n2 = put_utf16(i + 60, "TW Mobile");
+    put_le32(i + 28, 60);
+    put_le32(i + 32, (uint32_t)n2);
+    return done_msg(b, MBIM_COMMAND_DONE, 22, MBIM_CID_REGISTER_STATE, 0, i, 80);
+}
+
+// IPv4 + IPv6 的 IP_CONFIGURATION：位址、閘道照 IK512 在 Mac 上撥 IPv4v6 拿到的，IPv6 DNS 用 Google 的當範例
+static const uint8_t V6_ADDR[16] = {0x24, 0x02, 0x75, 0x00, 0x04, 0xf6, 0x9a, 0x73,
+                                    0x8c, 0x45, 0x3f, 0x2d, 0x7a, 0x2f, 0x0e, 0xd8};
+static const uint8_t V6_GW[16] = {0x24, 0x02, 0x75, 0x00, 0x04, 0xf6, 0x9a, 0x73,
+                                  0xe9, 0x65, 0x6c, 0xe9, 0x6e, 0xbc, 0xbf, 0x6d};
+static const uint8_t V6_DNS1[16] = {0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88};
+static const uint8_t V6_DNS2[16] = {0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x44};
+static int fx_ipcfg6_done(uint8_t *b) {
+    uint8_t i[148] = {0};
+    put_le32(i + 4, 0x0F);
+    put_le32(i + 8, 0x0F);
+    put_le32(i + 12, 1);
+    put_le32(i + 16, 60);
+    put_le32(i + 20, 1);
+    put_le32(i + 24, 68);
+    put_le32(i + 28, 88);
+    put_le32(i + 32, 92);
+    put_le32(i + 36, 2);
+    put_le32(i + 40, 108);
+    put_le32(i + 44, 2);
+    put_le32(i + 48, 116);
+    put_le32(i + 52, 1500);
+    put_le32(i + 56, 1500);
+    put_le32(i + 60, 30);
+    memcpy(i + 64, (uint8_t[]){10, 21, 162, 178}, 4);
+    put_le32(i + 68, 64);
+    memcpy(i + 72, V6_ADDR, 16);
+    memcpy(i + 88, (uint8_t[]){10, 21, 162, 177}, 4);
+    memcpy(i + 92, V6_GW, 16);
+    memcpy(i + 108, (uint8_t[]){61, 31, 1, 1, 61, 31, 233, 1}, 8);
+    memcpy(i + 116, V6_DNS1, 16);
+    memcpy(i + 132, V6_DNS2, 16);
+    return done_msg(b, MBIM_COMMAND_DONE, 23, MBIM_CID_IP_CONFIGURATION, 0, i, sizeof i);
+}
+
+// MBIM_DEVICE_CAPS_INFO，CustomDataClass "5G/TDS"（IK512 的值），DeviceId 等留空
+static int fx_device_caps_done(uint8_t *b) {
+    uint8_t i[76] = {0};
+    put_le32(i, 2);
+    put_le32(i + 4, 1);
+    put_le32(i + 8, 1);
+    put_le32(i + 12, 2);
+    put_le32(i + 16, 0x80000020);
+    put_le32(i + 20, 3);
+    put_le32(i + 24, 1);
+    put_le32(i + 28, 15);
+    int n = put_utf16(i + 64, "5G/TDS");
+    put_le32(i + 32, 64);
+    put_le32(i + 36, (uint32_t)n);
+    return done_msg(b, MBIM_COMMAND_DONE, 24, MBIM_CID_DEVICE_CAPS, 0, i, sizeof i);
+}
+
 // ---------- 給 mbim_oracle.py 的請求 ----------
+
+static int req_connect_type(uint8_t *b, uint32_t tid, bool activate, const char *apn, uint32_t type) {
+    uint8_t info[256];
+    int il = mbim_info_connect_set(info, sizeof info, 0, activate, apn, type);
+    return mbim_build_command(b, 4096, tid, MBIM_UUID_BASIC_CONNECT, MBIM_CID_CONNECT, true, info, il);
+}
 
 static int req_connect(uint8_t *b, uint32_t tid, bool activate, const char *apn) {
     uint8_t info[256];
@@ -187,6 +287,16 @@ static int dump(void) {
     hex("req", "connect_deactivate", b, req_connect(b, 11, false, ""));
     hex("req", "connect_activate_a", b, req_connect(b, 12, true, "a"));
     hex("req", "connect_activate_fet", b, req_connect(b, 13, true, "fet"));
+    hex("req", "connect_activate_internet_v4v6", b, req_connect_type(b, 14, true, "internet", MBIM_IP_TYPE_IPV4V6));
+    hex("req", "pin_query", b, mbim_build_command(b, sizeof b, 15, MBIM_UUID_BASIC_CONNECT, MBIM_CID_PIN, false, NULL, 0));
+    il = mbim_info_pin_enter(info, sizeof info, "1234");
+    hex("req", "pin_enter_1234", b, mbim_build_command(b, sizeof b, 16, MBIM_UUID_BASIC_CONNECT, MBIM_CID_PIN, true, info, il));
+    il = mbim_info_pin_enter(info, sizeof info, "12345");
+    hex("req", "pin_enter_12345", b, mbim_build_command(b, sizeof b, 17, MBIM_UUID_BASIC_CONNECT, MBIM_CID_PIN, true, info, il));
+    hex("req", "signal_query", b,
+        mbim_build_command(b, sizeof b, 18, MBIM_UUID_BASIC_CONNECT, MBIM_CID_SIGNAL_STATE, false, NULL, 0));
+    hex("req", "device_caps_query", b,
+        mbim_build_command(b, sizeof b, 19, MBIM_UUID_BASIC_CONNECT, MBIM_CID_DEVICE_CAPS, false, NULL, 0));
 
     hex("resp", "real_ipcfg_done", REAL_IPCFG_DONE, sizeof REAL_IPCFG_DONE);
     hex("resp", "real_radio_done", REAL_RADIO_DONE, sizeof REAL_RADIO_DONE);
@@ -195,6 +305,11 @@ static int dump(void) {
     hex("resp", "register_done_home", b, fx_register_done(b));
     hex("resp", "packet_service_done_attached", b, fx_packet_done(b));
     hex("resp", "subscriber_ready_done", b, fx_subscriber_done(b));
+    hex("resp", "pin_done_locked", b, fx_pin_done(b));
+    hex("resp", "signal_done", b, fx_signal_done(b));
+    hex("resp", "register_done_named", b, fx_register_named(b));
+    hex("resp", "ipcfg6_done", b, fx_ipcfg6_done(b));
+    hex("resp", "device_caps_done", b, fx_device_caps_done(b));
     return 0;
 }
 
@@ -435,20 +550,20 @@ static void test_l2(void) {
     int rl = 0, il = 0;
     const uint8_t *ip = NULL;
     int n = arp_request(f, me, gw);
-    CHECK(l2_from_host(f, n, me, GW, reply, &rl, &ip, &il) == 1 && rl == 42);
+    CHECK(l2_from_host(f, n, me, NULL, GW, reply, &rl, &ip, &il) == 1 && rl == 42);
     CHECK(memcmp(reply, HOST, 6) == 0 && memcmp(reply + 6, GW, 6) == 0 && get_be16(reply + 12) == 0x0806);
     CHECK(get_be16(reply + 20) == 2 && memcmp(reply + 22, GW, 6) == 0 && memcmp(reply + 28, &gw, 4) == 0);
     CHECK(memcmp(reply + 32, HOST, 6) == 0 && memcmp(reply + 38, &me, 4) == 0);
     // 其他鄰居也回（這條線上只有數據機）
     n = arp_request(f, me, ip4(100, 98, 240, 97));
-    CHECK(l2_from_host(f, n, me, GW, reply, &rl, &ip, &il) == 1);
+    CHECK(l2_from_host(f, n, me, NULL, GW, reply, &rl, &ip, &il) == 1);
     // 系統自己的重複位址檢查、宣告、問自己的 IP：都不能回
     n = arp_request(f, 0, me);
-    CHECK(l2_from_host(f, n, me, GW, reply, &rl, &ip, &il) == 0);
+    CHECK(l2_from_host(f, n, me, NULL, GW, reply, &rl, &ip, &il) == 0);
     n = arp_request(f, me, me);
-    CHECK(l2_from_host(f, n, me, GW, reply, &rl, &ip, &il) == 0);
+    CHECK(l2_from_host(f, n, me, NULL, GW, reply, &rl, &ip, &il) == 0);
     n = arp_request(f, gw, me);
-    CHECK(l2_from_host(f, n, me, GW, reply, &rl, &ip, &il) == 0);
+    CHECK(l2_from_host(f, n, me, NULL, GW, reply, &rl, &ip, &il) == 0);
 
     // IPv4：去掉乙太網路標頭和最短長度補的 0
     uint8_t pkt[64];
@@ -459,15 +574,15 @@ static void test_l2(void) {
     memcpy(f + 6, HOST, 6);
     put_be16(f + 12, 0x0800);
     memcpy(f + 14, pkt, (size_t)pl);
-    CHECK(l2_from_host(f, 64, me, GW, reply, &rl, &ip, &il) == 2 && il == 44 && ip == f + 14);
+    CHECK(l2_from_host(f, 64, me, NULL, GW, reply, &rl, &ip, &il) == 2 && il == 44 && ip == f + 14);
     put_be16(f + 12, 0x86dd);
-    CHECK(l2_from_host(f, 64, me, GW, reply, &rl, &ip, &il) == 0);
+    CHECK(l2_from_host(f, 64, me, NULL, GW, reply, &rl, &ip, &il) == 0);
 
     uint8_t frame[128];
     CHECK(l2_to_host(frame, sizeof frame, pkt, pl, HOST, GW) == 58);
     CHECK(memcmp(frame, HOST, 6) == 0 && memcmp(frame + 6, GW, 6) == 0 && get_be16(frame + 12) == 0x0800);
     CHECK(memcmp(frame + 14, pkt, (size_t)pl) == 0);
-    pkt[0] = 0x60;
+    pkt[0] = 0x50;  // 不是 IPv4 也不是 IPv6
     CHECK(l2_to_host(frame, sizeof frame, pkt, pl, HOST, GW) == 0);
 }
 
@@ -497,6 +612,171 @@ static void test_netmask(void) {
     CHECK(mbim_netmask(ip4(10, 1, 2, 3), ip4(10, 1, 2, 4), 0) == ip4(255, 255, 255, 248));
 }
 
+static void test_pin(void) {
+    uint8_t p[64];
+    int n = mbim_info_pin_enter(p, sizeof p, "1234");
+    CHECK(n == 32 && get_le32(p) == MBIM_PIN_TYPE_PIN1 && get_le32(p + 4) == 0);
+    CHECK(get_le32(p + 8) == 24 && get_le32(p + 12) == 8 && get_le32(p + 16) == 0 && get_le32(p + 20) == 0);
+    CHECK(memcmp(p + 24, "1\0002\0003\0004\0", 8) == 0);
+    CHECK(mbim_info_pin_enter(p, sizeof p, "12345") == 36);  // 10 bytes 補到 12
+    CHECK(mbim_info_pin_enter(p, sizeof p, "123") < 0);
+    CHECK(mbim_info_pin_enter(p, sizeof p, "123456789") < 0);
+    CHECK(mbim_info_pin_enter(p, sizeof p, "12a4") < 0);
+    CHECK(mbim_info_pin_enter(p, sizeof p, "") < 0);
+    uint8_t b[256];
+    mbim_msg_t m;
+    uint32_t t = 0, s = 0, a = 0;
+    CHECK(mbim_parse(b, fx_pin_done(b), &m) == 0 && mbim_parse_pin_info(m.info, m.info_len, &t, &s, &a) == 0);
+    CHECK(t == MBIM_PIN_TYPE_PIN1 && s == MBIM_PIN_STATE_LOCKED && a == 3);
+    CHECK(mbim_parse_pin_info(m.info, 8, &t, &s, &a) < 0);
+}
+
+static void test_signal_and_names(void) {
+    uint8_t b[512];
+    mbim_msg_t m;
+    uint32_t rssi = 0, er = 0;
+    CHECK(mbim_parse(b, fx_signal_done(b), &m) == 0 && mbim_parse_signal(m.info, m.info_len, &rssi, &er) == 0);
+    CHECK(rssi == 14 && er == 99 && mbim_signal_bars(rssi) == 2);
+    CHECK(mbim_signal_bars(99) == -1 && mbim_signal_bars(31) == 4 && mbim_signal_bars(20) == 4 && mbim_signal_bars(19) == 3);
+    CHECK(mbim_signal_bars(10) == 2 && mbim_signal_bars(5) == 1 && mbim_signal_bars(4) == 0 && mbim_signal_bars(0) == 0);
+
+    char name[64];
+    CHECK(mbim_parse(b, fx_register_named(b), &m) == 0 && mbim_parse_provider_name(m.info, m.info_len, name, sizeof name) == 0);
+    CHECK(strcmp(name, "TW Mobile") == 0);
+    // 中文名稱（UTF-16 → UTF-8）
+    uint8_t r[80];
+    memcpy(r, m.info, 48);
+    const uint16_t cht[] = {0x4E2D, 0x83EF, 0x96FB, 0x4FE1};  // 中華電信
+    for (int i = 0; i < 4; i++) {
+        r[48 + 2 * i] = (uint8_t)cht[i];
+        r[49 + 2 * i] = (uint8_t)(cht[i] >> 8);
+    }
+    put_le32(r + 28, 48);
+    put_le32(r + 32, 8);
+    CHECK(mbim_parse_provider_name(r, 56, name, sizeof name) == 0 && strcmp(name, "中華電信") == 0);
+    put_le32(r + 32, 200);  // 超出範圍
+    CHECK(mbim_parse_provider_name(r, 56, name, sizeof name) < 0);
+    // 太小的輸出緩衝區不會寫超過
+    put_le32(r + 32, 8);
+    char tiny[5];
+    CHECK(mbim_parse_provider_name(r, 56, tiny, sizeof tiny) == 0 && strcmp(tiny, "中") == 0);
+
+    uint32_t cls = 0;
+    CHECK(mbim_parse(b, fx_packet_done(b), &m) == 0 && mbim_parse_data_class(m.info, m.info_len, &cls) == 0 && cls == 0x20);
+    CHECK(strcmp(mbim_tech_name(0x80000000u, "5G/TDS"), "5G") == 0);
+    CHECK(strcmp(mbim_tech_name(0x80000000u, "TDS"), "") == 0);
+    CHECK(strcmp(mbim_tech_name(0x20, ""), "LTE") == 0 && strcmp(mbim_tech_name(0x60, ""), "5G") == 0);
+    CHECK(strcmp(mbim_tech_name(0x08, ""), "3G") == 0 && strcmp(mbim_tech_name(0, ""), "") == 0);
+
+    // DEVICE_CAPS 的 CustomDataClass 在固定欄位的 32/36（mbim_query_custom_class 讀同一個位置）
+    CHECK(mbim_parse(b, fx_device_caps_done(b), &m) == 0 && m.cid == MBIM_CID_DEVICE_CAPS);
+    CHECK(get_le32(m.info + 32) == 64 && get_le32(m.info + 36) == 12 && memcmp(m.info + 64, "5\0G\0/\0T\0D\0S\0", 12) == 0);
+}
+
+static void test_ip6_config(void) {
+    uint8_t b[256];
+    mbim_msg_t m;
+    CHECK(mbim_parse(b, fx_ipcfg6_done(b), &m) == 0);
+    mbim_ipv4_t v4;
+    mbim_ipv6_t v6;
+    CHECK(mbim_parse_ip_config(m.info, m.info_len, &v4) == 0 && v4.ip == ip4(10, 21, 162, 178) && v4.prefix == 30);
+    CHECK(v4.gw == ip4(10, 21, 162, 177) && v4.ndns == 2 && v4.mtu == 1500);
+    CHECK(mbim_parse_ip6_config(m.info, m.info_len, &v6) == 0);
+    CHECK(memcmp(v6.addr, V6_ADDR, 16) == 0 && v6.prefix == 64 && v6.has_gw && memcmp(v6.gw, V6_GW, 16) == 0);
+    CHECK(v6.ndns == 2 && memcmp(v6.dns[0], V6_DNS1, 16) == 0 && memcmp(v6.dns[1], V6_DNS2, 16) == 0 && v6.mtu == 1500);
+    // IK512 只給 IPv4 時（PVE 上的真實回應）沒有 IPv6
+    CHECK(mbim_parse_ip6_config(REAL_IPCFG_DONE + 48, 80, &v6) < 0 && v6.prefix == 0);
+    // 位址 offset 指到外面
+    uint8_t bad[148];
+    memcpy(bad, m.info, 148);
+    put_le32(bad + 24, 140);
+    CHECK(mbim_parse_ip6_config(bad, 148, &v6) < 0);
+}
+
+// IPv6 frame：乙太網路 + IPv6 + payload
+static int frame6(uint8_t *f, const uint8_t src[16], const uint8_t dst[16], uint8_t next, const uint8_t *pl, int pl_len) {
+    memcpy(f, GW, 6);
+    memcpy(f + 6, HOST, 6);
+    put_be16(f + 12, 0x86dd);
+    uint8_t *h = f + 14;
+    memset(h, 0, 40);
+    h[0] = 0x60;
+    put_be16(h + 4, (uint16_t)pl_len);
+    h[6] = next;
+    h[7] = 255;
+    memcpy(h + 8, src, 16);
+    memcpy(h + 24, dst, 16);
+    memcpy(h + 40, pl, (size_t)pl_len);
+    return 14 + 40 + pl_len;
+}
+
+static uint16_t icmp6_sum(const uint8_t *h, const uint8_t *msg, int len) {
+    uint32_t sum = 0;
+    for (int i = 0; i < 16; i += 2) sum += (uint32_t)get_be16(h + 8 + i) + get_be16(h + 24 + i);
+    sum += (uint32_t)len + 58;
+    return ip_checksum(msg, len, sum);
+}
+
+static void test_nd(void) {
+    static const uint8_t LL[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x10, 0xe7, 0xe4, 0xff, 0xfe, 0xed, 0x32, 0xff};
+    static const uint8_t ANY[16] = {0};
+    uint8_t snm[16] = {0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xbc, 0xbf, 0x6d};  // 閘道的 solicited-node
+    uint8_t ns[32] = {135, 0};
+    memcpy(ns + 8, V6_GW, 16);
+    ns[24] = 1;  // Source Link-Layer Address
+    ns[25] = 1;
+    memcpy(ns + 26, HOST, 6);
+    uint8_t f[256], reply[128];
+    int rl = 0, il = 0;
+    const uint8_t *ip = NULL;
+
+    // 系統用 link-local 問閘道：回 NA
+    int n = frame6(f, LL, snm, 58, ns, 32);
+    CHECK(l2_from_host(f, n, 0, V6_ADDR, GW, reply, &rl, &ip, &il) == 1 && rl == 86);
+    const uint8_t *h = reply + 14, *na = reply + 54;
+    CHECK(memcmp(reply, HOST, 6) == 0 && memcmp(reply + 6, GW, 6) == 0 && get_be16(reply + 12) == 0x86dd);
+    CHECK(h[0] == 0x60 && get_be16(h + 4) == 32 && h[6] == 58 && h[7] == 255);
+    CHECK(memcmp(h + 8, V6_GW, 16) == 0 && memcmp(h + 24, LL, 16) == 0);
+    CHECK(na[0] == 136 && na[4] == 0x60 && memcmp(na + 8, V6_GW, 16) == 0);
+    CHECK(na[24] == 2 && na[25] == 1 && memcmp(na + 26, GW, 6) == 0);
+    CHECK(icmp6_sum(h, na, 32) == 0);
+    // 用全域位址做 NUD 也回
+    n = frame6(f, V6_ADDR, V6_GW, 58, ns, 32);
+    CHECK(l2_from_host(f, n, 0, V6_ADDR, GW, reply, &rl, &ip, &il) == 1);
+    // 重複位址偵測（來源 ::）、問自己的位址：不回
+    n = frame6(f, ANY, snm, 58, ns, 32);
+    CHECK(l2_from_host(f, n, 0, V6_ADDR, GW, reply, &rl, &ip, &il) == 0);
+    uint8_t ns_self[32];
+    memcpy(ns_self, ns, 32);
+    memcpy(ns_self + 8, V6_ADDR, 16);
+    n = frame6(f, LL, snm, 58, ns_self, 32);
+    CHECK(l2_from_host(f, n, 0, V6_ADDR, GW, reply, &rl, &ip, &il) == 0);
+    // 沒有 IPv6 就全部不理
+    n = frame6(f, LL, snm, 58, ns, 32);
+    CHECK(l2_from_host(f, n, 0, NULL, GW, reply, &rl, &ip, &il) == 0);
+
+    // 一般 IPv6 封包：送進行動網路
+    uint8_t udp[12] = {0x12, 0x34, 0, 53, 0, 12, 0, 0, 'd', 't', '6', '!'};
+    n = frame6(f, V6_ADDR, V6_DNS1, 17, udp, sizeof udp);
+    CHECK(l2_from_host(f, n + 6, 0, V6_ADDR, GW, reply, &rl, &ip, &il) == 2 && ip == f + 14 && il == 52);
+    // link-local 來源、多播目的地：不送
+    n = frame6(f, LL, V6_DNS1, 17, udp, sizeof udp);
+    CHECK(l2_from_host(f, n, 0, V6_ADDR, GW, reply, &rl, &ip, &il) == 0);
+    n = frame6(f, V6_ADDR, snm, 17, udp, sizeof udp);
+    CHECK(l2_from_host(f, n, 0, V6_ADDR, GW, reply, &rl, &ip, &il) == 0);
+    // 長度欄位比實際長：丟掉
+    n = frame6(f, V6_ADDR, V6_DNS1, 17, udp, sizeof udp);
+    put_be16(f + 18, 500);
+    CHECK(l2_from_host(f, n, 0, V6_ADDR, GW, reply, &rl, &ip, &il) == 0);
+
+    // 收到的 IPv6 補上 0x86dd 的標頭
+    uint8_t frame[128];
+    n = frame6(f, V6_DNS1, V6_ADDR, 17, udp, sizeof udp);
+    CHECK(l2_to_host(frame, sizeof frame, f + 14, 52, HOST, GW) == 66 && get_be16(frame + 12) == 0x86dd);
+    CHECK(memcmp(frame, HOST, 6) == 0 && memcmp(frame + 14, f + 14, 52) == 0);
+    CHECK(l2_to_host(frame, sizeof frame, f + 14, 30, HOST, GW) == 0);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--dump") == 0) return dump();
     test_requests_match_device();
@@ -509,6 +789,10 @@ int main(int argc, char **argv) {
     test_l2();
     test_icmp_probe();
     test_netmask();
+    test_pin();
+    test_signal_and_names();
+    test_ip6_config();
+    test_nd();
     printf("mbim: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

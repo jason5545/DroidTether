@@ -1,6 +1,7 @@
 #include "netcfg.h"
 
 #include <SystemConfiguration/SystemConfiguration.h>
+#include <arpa/inet.h>
 #include <string.h>
 
 #define SERVICE_ID CFSTR("DroidTether")
@@ -16,6 +17,35 @@ static struct {
     bool primary;
     bool valid;
 } g_last;
+
+static struct {
+    uint8_t addr[16], router[16];
+    int prefix;
+    bool has_router;
+    uint8_t dns[2][16];
+    int ndns;
+    bool valid;
+} g_v6;
+
+void netcfg_set_ipv6(const uint8_t addr[16], int prefix, const uint8_t *router, const uint8_t (*dns)[16], int ndns) {
+    memcpy(g_v6.addr, addr, 16);
+    g_v6.prefix = prefix;
+    g_v6.has_router = router != NULL;
+    if (router) memcpy(g_v6.router, router, 16);
+    g_v6.ndns = ndns < 2 ? ndns : 2;
+    for (int i = 0; i < g_v6.ndns; i++) memcpy(g_v6.dns[i], dns[i], 16);
+    g_v6.valid = true;
+}
+
+void netcfg_clear_ipv6(void) {
+    g_v6.valid = false;
+}
+
+static CFStringRef cfstr_ip6(const uint8_t a[16]) {
+    char buf[64];
+    inet_ntop(AF_INET6, a, buf, sizeof buf);
+    return CFStringCreateWithCString(NULL, buf, kCFStringEncodingASCII);
+}
 
 static CFStringRef key_for(CFStringRef entity) {
     return SCDynamicStoreKeyCreateNetworkServiceEntity(NULL, kSCDynamicStoreDomainState, SERVICE_ID, entity);
@@ -45,11 +75,13 @@ static bool ensure_store(void) {
 
 void netcfg_remove_stale(void) {
     if (!ensure_store()) return;
-    CFStringRef k4 = key_for(kSCEntNetIPv4), kd = key_for(kSCEntNetDNS);
+    CFStringRef k4 = key_for(kSCEntNetIPv4), kd = key_for(kSCEntNetDNS), k6 = key_for(kSCEntNetIPv6);
     SCDynamicStoreRemoveValue(g_store, kd);
+    SCDynamicStoreRemoveValue(g_store, k6);
     SCDynamicStoreRemoveValue(g_store, k4);
     CFRelease(k4);
     CFRelease(kd);
+    CFRelease(k6);
 }
 
 // 暫存值只能新增不存在的鍵；先移除再新增，確保它跟著這個 session 消失。
@@ -75,9 +107,45 @@ int netcfg_publish(const char *ifname, uint32_t ip, uint32_t mask, uint32_t rout
     // DNS 先寫：IPv4 一出現 configd 就會重算 primary，那時 DNS 要已經在。
     CFMutableDictionaryRef d =
         CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFArrayRef servers = cfarr_ips(dns, ndns);
+    CFArrayRef v4dns = cfarr_ips(dns, ndns);
+    CFMutableArrayRef servers = CFArrayCreateMutableCopy(NULL, 0, v4dns);
+    CFRelease(v4dns);
+    for (int i = 0; g_v6.valid && i < g_v6.ndns; i++) {
+        CFStringRef s6 = cfstr_ip6(g_v6.dns[i]);
+        CFArrayAppendValue(servers, s6);
+        CFRelease(s6);
+    }
     CFDictionarySetValue(d, kSCPropNetDNSServerAddresses, servers);
     CFRelease(servers);
+
+    CFMutableDictionaryRef v6 = NULL;
+    if (g_v6.valid) {
+        v6 = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFStringRef a6 = cfstr_ip6(g_v6.addr);
+        CFArrayRef addrs6 = CFArrayCreate(NULL, (const void **)&a6, 1, &kCFTypeArrayCallBacks);
+        CFNumberRef pl = CFNumberCreate(NULL, kCFNumberIntType, &g_v6.prefix);
+        CFArrayRef pls = CFArrayCreate(NULL, (const void **)&pl, 1, &kCFTypeArrayCallBacks);
+        CFStringRef ifn6 = CFStringCreateWithCString(NULL, ifname, kCFStringEncodingASCII);
+        CFDictionarySetValue(v6, kSCPropNetIPv6Addresses, addrs6);
+        CFDictionarySetValue(v6, kSCPropNetIPv6PrefixLength, pls);
+        CFDictionarySetValue(v6, kSCPropInterfaceName, ifn6);
+        if (g_v6.has_router) {
+            CFStringRef r6 = cfstr_ip6(g_v6.router);
+            CFDictionarySetValue(v6, kSCPropNetIPv6Router, r6);
+            CFRelease(r6);
+        }
+        if (primary) {
+            int one = 1;
+            CFNumberRef n = CFNumberCreate(NULL, kCFNumberIntType, &one);
+            CFDictionarySetValue(v6, CFSTR("OverridePrimary"), n);
+            CFRelease(n);
+        }
+        CFRelease(a6);
+        CFRelease(addrs6);
+        CFRelease(pl);
+        CFRelease(pls);
+        CFRelease(ifn6);
+    }
 
     CFMutableDictionaryRef v4 =
         CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -100,12 +168,15 @@ int netcfg_publish(const char *ifname, uint32_t ip, uint32_t mask, uint32_t rout
     CFRelease(rtr);
     CFRelease(ifn);
 
-    CFStringRef kd = key_for(kSCEntNetDNS), k4 = key_for(kSCEntNetIPv4);
-    bool ok = put_temp(kd, d) && put_temp(k4, v4);
+    CFStringRef kd = key_for(kSCEntNetDNS), k4 = key_for(kSCEntNetIPv4), k6 = key_for(kSCEntNetIPv6);
+    bool ok = put_temp(kd, d) && (!v6 || put_temp(k6, v6)) && put_temp(k4, v4);
+    if (!v6) SCDynamicStoreRemoveValue(g_store, k6);
     CFRelease(kd);
     CFRelease(k4);
+    CFRelease(k6);
     CFRelease(d);
     CFRelease(v4);
+    if (v6) CFRelease(v6);
     if (!ok) {
         LOGE("publish network service: %s", SCErrorString(SCError()));
         return -1;
@@ -115,6 +186,7 @@ int netcfg_publish(const char *ifname, uint32_t ip, uint32_t mask, uint32_t rout
 
 void netcfg_withdraw(void) {
     g_last.valid = false;
+    g_v6.valid = false;
     if (!g_store) return;
     netcfg_remove_stale();
     CFRelease(g_store);

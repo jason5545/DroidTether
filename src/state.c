@@ -4,11 +4,14 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 pthread_mutex_t g_state_lock = PTHREAD_MUTEX_INITIALIZER;
-dt_config g_cfg = {.enabled = true, .primary = true, .dns_from_phone = true, .apn = "internet"};
-dt_status g_st = {.state = ST_STARTING};
+dt_config g_cfg = {.enabled = true, .primary = true, .dns_from_phone = true, .apn = "internet", .ipv6 = true};
+dt_status g_st = {.state = ST_STARTING, .signal_bars = -1, .pin_attempts = -1};
+char g_pin_path[300];
 atomic_ulong g_rx_bytes, g_tx_bytes;
 atomic_bool g_dns_probe_fail;
 
@@ -34,12 +37,68 @@ void status_set(dt_state st, const char *device, const char *error) {
             g_st.ip = g_st.gw = g_st.mask = 0;
             g_st.ndns = 0;
             g_st.dns_fallback = false;
+            g_st.signal_bars = -1;
+            g_st.signal_dbm = 0;
+            g_st.carrier[0] = g_st.tech[0] = g_st.ipv6[0] = '\0';
+            g_st.ndns6 = 0;
         }
+        if (st != ST_CONNECTING) g_st.pin_attempts = -1;
     }
     g_st.state = st;
     if (device) strlcpy(g_st.device, device, sizeof g_st.device);
     if (error) strlcpy(g_st.error, error, sizeof g_st.error);
     pthread_mutex_unlock(&g_state_lock);
+}
+
+void status_set_link(int bars, int dbm, const char *carrier, const char *tech) {
+    pthread_mutex_lock(&g_state_lock);
+    g_st.signal_bars = bars;
+    g_st.signal_dbm = dbm;
+    strlcpy(g_st.carrier, carrier, sizeof g_st.carrier);
+    strlcpy(g_st.tech, tech, sizeof g_st.tech);
+    pthread_mutex_unlock(&g_state_lock);
+}
+
+bool sim_pin_valid(const char *pin) {
+    size_t n = strlen(pin);
+    if (n < 4 || n > 8) return false;
+    for (size_t i = 0; i < n; i++)
+        if (pin[i] < '0' || pin[i] > '9') return false;
+    return true;
+}
+
+bool sim_pin_load(char *out, size_t cap) {
+    out[0] = '\0';
+    if (!g_pin_path[0]) return false;
+    int fd = open(g_pin_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char buf[16] = {0};
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return false;
+    buf[strcspn(buf, "\r\n")] = '\0';
+    if (!sim_pin_valid(buf)) return false;
+    strlcpy(out, buf, cap);
+    return true;
+}
+
+int sim_pin_save(const char *pin) {
+    if (!g_pin_path[0] || !sim_pin_valid(pin)) return -1;
+    unlink(g_pin_path);
+    int fd = open(g_pin_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    bool ok = write(fd, pin, strlen(pin)) == (ssize_t)strlen(pin);
+    close(fd);
+    return ok ? 0 : -1;
+}
+
+void sim_pin_forget(void) {
+    if (g_pin_path[0]) unlink(g_pin_path);
+}
+
+bool sim_pin_saved(void) {
+    struct stat st;
+    return g_pin_path[0] && stat(g_pin_path, &st) == 0;
 }
 
 int config_parse_dns(const char *arg, dt_config *c) {
@@ -86,6 +145,7 @@ void config_load(const char *path) {
         else if (strcmp(k, "primary") == 0) g_cfg.primary = strcmp(v, "0") != 0;
         else if (strcmp(k, "wifi_off") == 0) g_cfg.wifi_off = strcmp(v, "0") != 0;
         else if (strcmp(k, "dns") == 0 && config_parse_dns(v, &g_cfg) != 0) LOGW("config: bad dns '%s'", v);
+        else if (strcmp(k, "ipv6") == 0) g_cfg.ipv6 = strcmp(v, "0") != 0;
         else if (strcmp(k, "apn") == 0) {
             if (config_valid_apn(v)) strlcpy(g_cfg.apn, v, sizeof g_cfg.apn);
             else LOGW("config: bad apn '%s'", v);
@@ -120,7 +180,7 @@ int config_save(const char *path) {
             fprintf(f, "%s%s", i ? "," : "", ip_str(g_cfg.dns[i], b));
         }
     }
-    fprintf(f, "\napn=%s\n", g_cfg.apn);
+    fprintf(f, "\napn=%s\nipv6=%d\n", g_cfg.apn, g_cfg.ipv6);
     pthread_mutex_unlock(&g_state_lock);
     fclose(f);
     return rename(tmp, path);

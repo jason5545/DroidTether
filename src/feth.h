@@ -21,6 +21,8 @@ void feth_destroy_stale(void);
 
 int feth_create(feth_t *f, const uint8_t mac[6], int mtu);
 int feth_set_ipv4(feth_t *f, uint32_t ip, uint32_t mask);
+// 加一個 IPv6 位址（link-local 由系統自己產生）。
+int feth_set_ipv6(feth_t *f, const uint8_t addr[16], int prefix);
 void feth_destroy(feth_t *f);
 
 // 把一個 frame 送進系統（從 peer 送出，host 會收到）。

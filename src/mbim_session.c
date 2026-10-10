@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -28,12 +29,17 @@ static const uint8_t GW_MAC[6] = {0x02, 0x44, 0x54, 0x4d, 0x00, 0x02};
 #define PROBE_FAILS 3
 #define PROBE_ID 0x4454
 
+#define LINK_EVERY_S 15  // 訊號、電信商、網路制式多久查一次
+#define SIM_RETRY_S 10   // SIM、APN、註冊的錯誤等多久再重開一次
+
 typedef struct {
     usbdev_t *u;
     mbim_dev_t m;
     ntb_params_t np;
     feth_t net;
     uint32_t ip, gw;  // network order
+    uint8_t ip6[16];
+    bool has_ip6;
     atomic_bool net_ready, dead, deactivated;
     atomic_long last_rx;
     pthread_mutex_t tx_lock;
@@ -58,6 +64,12 @@ static void on_indicate(void *ctx, const mbim_msg_t *m) {
         uint32_t err, st;
         if (mbim_parse_register_state(m->info, m->info_len, &err, &st) == 0) LOGD("register state %u (nw error %u)", st, err);
     }
+}
+
+static void update_link(msess_t *s, const char *custom) {
+    mbim_link_t l;
+    if (mbim_query_link(&s->m, &l) != 0) return;
+    status_set_link(l.bars, l.rssi >= 0 ? -113 + 2 * l.rssi : 0, l.provider, mbim_tech_name(l.data_class, custom));
 }
 
 // ---------- 資料 ----------
@@ -131,11 +143,11 @@ static void *rx_thread(void *arg) {
 
 static void on_host_frame(void *ctx, const uint8_t *f, int len) {
     msess_t *s = ctx;
-    uint8_t reply[64];
+    uint8_t reply[128];
     int rlen = 0;
     const uint8_t *ip = NULL;
     int ilen = 0;
-    switch (l2_from_host(f, len, s->ip, GW_MAC, reply, &rlen, &ip, &ilen)) {
+    switch (l2_from_host(f, len, s->ip, s->has_ip6 ? s->ip6 : NULL, GW_MAC, reply, &rlen, &ip, &ilen)) {
         case 1:
             feth_inject(&s->net, reply, rlen);
             break;
@@ -148,7 +160,7 @@ static void on_host_frame(void *ctx, const uint8_t *f, int len) {
             }
             break;
         default:
-            break;  // IPv6 等：這條連線只有 IPv4
+            break;  // link-local、多播，或沒有 IPv6 時的 IPv6
     }
 }
 
@@ -179,7 +191,13 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
     LOGI("found %s (%04x:%04x, MBIM)", u->name, u->vid, u->pid);
     g_rx_bytes = 0;
     g_tx_bytes = 0;
-    status_set(ST_CONNECTING, u->name, "");
+    // 錯誤訊息留著，連上了才清：每次重試都清掉的話，App 上只會閃一下
+    status_set(ST_CONNECTING, u->name, NULL);
+    pthread_mutex_lock(&g_state_lock);
+    g_st.modem = true;
+    pthread_mutex_unlock(&g_state_lock);
+    char pin[16];
+    sim_pin_load(pin, sizeof pin);
 
     if (mbim_dev_start(&s->m, u, on_indicate, s) != 0 || mbim_data_start(u, &s->np) != 0) {
         err = "mbim_failed";
@@ -191,11 +209,23 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
         goto out;
     }
     mbim_ipv4_t ipc;
-    err = mbim_connect(&s->m, opt->apn, &ipc);
+    mbim_ipv6_t ip6;
+    mbim_connect_opts_t co = {.apn = opt->apn, .ipv6 = opt->ipv6, .pin = pin};
+    err = mbim_connect(&s->m, &co, &ipc, &ip6);
+    memset(pin, 0, sizeof pin);
+    if (co.pin_rejected) {
+        LOGW("forgetting the saved SIM PIN so it is not tried again");
+        sim_pin_forget();
+    }
+    pthread_mutex_lock(&g_state_lock);
+    g_st.pin_attempts = co.pin_attempts;
+    pthread_mutex_unlock(&g_state_lock);
     if (err) {
         if (stopping()) err = NULL;
         goto out;
     }
+    char custom[32];
+    mbim_query_custom_class(&s->m, custom, sizeof custom);
     connected = true;
     s->ip = ipc.ip;
     s->gw = ipc.gw ? ipc.gw : ipc.ip;
@@ -228,6 +258,19 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
     if (feth_set_ipv4(&s->net, s->ip, mask) != 0) {
         err = "interface_failed";
         goto out;
+    }
+    char ip6str[64] = "";
+    if (opt->ipv6 && ip6.prefix) {
+        if (feth_set_ipv6(&s->net, ip6.addr, ip6.prefix) == 0) {
+            memcpy(s->ip6, ip6.addr, 16);
+            s->has_ip6 = true;
+            netcfg_set_ipv6(ip6.addr, ip6.prefix, ip6.has_gw ? ip6.gw : NULL, (const uint8_t(*)[16])ip6.dns, ip6.ndns);
+            char a6[48];
+            inet_ntop(AF_INET6, ip6.addr, a6, sizeof a6);
+            snprintf(ip6str, sizeof ip6str, "%s/%d", a6, ip6.prefix);
+        } else {
+            LOGW("could not add the IPv6 address; continuing with IPv4 only");
+        }
     }
 
     // 電信商的 DNS 不在數據機給的子網路裡（手機的 DNS 就是閘道，不一樣），configd 裝好這個服務的路由之前問不到。
@@ -275,18 +318,23 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
     memcpy(g_st.dns, dns, sizeof g_st.dns);
     g_st.ndns = ndns;
     g_st.dns_fallback = fallback;
+    strlcpy(g_st.ipv6, ip6str, sizeof g_st.ipv6);
+    g_st.ndns6 = 0;
+    for (int i = 0; s->has_ip6 && i < ip6.ndns && i < 2; i++)
+        inet_ntop(AF_INET6, ip6.dns[i], g_st.dns6[g_st.ndns6++], sizeof g_st.dns6[0]);
     pthread_mutex_unlock(&g_state_lock);
     status_set(ST_CONNECTED, NULL, "");
+    update_link(s, custom);
     wifi_tether_up(wifi_wanted());
     {
         char dl[80];
         dns_list(dl, sizeof dl, dns, ndns);
-        LOGI("modem up on %s: %s/%d -> %s, dns %s, mtu %d", s->net.host, ip_str(s->ip, b1), ipc.prefix,
-             ip_str(s->gw, b2), dl, mtu);
+        LOGI("modem up on %s: %s/%d -> %s, dns %s, mtu %d%s%s", s->net.host, ip_str(s->ip, b1), ipc.prefix,
+             ip_str(s->gw, b2), dl, mtu, ip6str[0] ? ", IPv6 " : "", ip6str);
     }
 
     time_t start = mono_now();
-    time_t last_check = start, last_probe = start, last_ping = 0;
+    time_t last_check = start, last_probe = start, last_ping = 0, last_link = start;
     int unanswered = 0;
     long rx_at_ping = 0;
     uint16_t ping_seq = 0;
@@ -318,6 +366,10 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
                 pthread_mutex_unlock(&g_state_lock);
                 if (opt->primary) wait_default_route(s->net.host);
             }
+        }
+        if (now - last_link >= LINK_EVERY_S) {
+            last_link = now;
+            update_link(s, custom);
         }
         // 有收到東西就代表通的；閒置超過 IDLE_PROBE_S 才 ping
         if (s->last_rx > rx_at_ping) unanswered = 0;
@@ -361,6 +413,11 @@ out:
         int rc = libusb_reset_device(u->h);
         LOGI("USB reset of the modem: %s", rc == 0 ? "done" : libusb_error_name(rc));
     }
+
+    // 要 PIN、APN 錯了、註冊不上，這些不會馬上好；別每秒重開一次 MBIM、重撥一次（電信商也不喜歡），
+    // 等一下再試。App 送 PIN、改 APN 會觸發重連，打斷這段等待。
+    if (err && (strncmp(err, "sim_", 4) == 0 || strcmp(err, "connect_failed") == 0 || strcmp(err, "not_registered") == 0))
+        sleep_ms_interruptible(SIM_RETRY_S * 1000);
 
     if (connected)
         LOGI("modem down: rx %lu packets / %lu B, tx %lu packets / %lu B, usb tx errors %lu, inject errors %lu",

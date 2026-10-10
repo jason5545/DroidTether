@@ -431,6 +431,9 @@ static bool run_session(usbdev_t *u, const dt_config *opt) {
     g_rx_bytes = 0;
     g_tx_bytes = 0;
     status_set(ST_CONNECTING, u->name, "");
+    pthread_mutex_lock(&g_state_lock);
+    g_st.modem = false;
+    pthread_mutex_unlock(&g_state_lock);
     const char *err = NULL;
     if (rndis_init(&s->rndis, u) != 0) {
         err = "rndis_failed";
@@ -766,6 +769,7 @@ int main(int argc, char **argv) {
     g_cfg.mtu = cli.mtu;
     pthread_mutex_unlock(&g_state_lock);
 
+    snprintf(g_pin_path, sizeof g_pin_path, "%s.sim-pin", config_path);
     netcfg_remove_stale();
     feth_destroy_stale();
     wifi_init(config_path);
@@ -811,6 +815,9 @@ int main(int argc, char **argv) {
         if (r == USB_BUSY) status_set(ST_BUSY, hint, "");
         else if (r == USB_PHONE_NO_TETHER) status_set(ST_PHONE_NO_TETHER, hint, "");
         else if (r == USB_NOT_FOUND) status_set(ST_WAITING, "", "");
+        pthread_mutex_lock(&g_state_lock);
+        g_st.modem = false;
+        pthread_mutex_unlock(&g_state_lock);
         if (r != last) {
             if (r == USB_BUSY) LOGW("RNDIS device %s found but busy (another tethering app holding it?)", hint);
             if (r == USB_PHONE_NO_TETHER) LOGI("%s connected, USB tethering is off", hint);

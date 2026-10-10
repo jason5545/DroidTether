@@ -248,8 +248,10 @@ int main(int argc, char **argv) {
     if (!ok) goto out;
 
     mbim_ipv4_t ipc;
+    mbim_ipv6_t ip6;
+    mbim_connect_opts_t co = {.apn = apn, .ipv6 = true, .pin = ""};
     t0 = now_ms();
-    const char *err = mbim_connect(&m, apn, &ipc);
+    const char *err = mbim_connect(&m, &co, &ipc, &ip6);
     char a[16], g[16], d0[16], d1[16];
     result(err == NULL, "connected with apn %s in %.1f s: %s", apn, (now_ms() - t0) / 1000, err ? err : "ok");
     if (err) goto out;
@@ -258,6 +260,26 @@ int main(int argc, char **argv) {
     result(ipc.ip && ipc.gw, "address %s/%d, gateway %s, dns %s %s, mtu %u", ip_str(ipc.ip, a), ipc.prefix,
            ip_str(ipc.gw, g), ipc.ndns > 0 ? ip_str(ipc.dns[0], d0) : "-", ipc.ndns > 1 ? ip_str(ipc.dns[1], d1) : "-",
            ipc.mtu);
+
+    if (ip6.prefix) {
+        char a6[64], g6[64];
+        inet_ntop(AF_INET6, ip6.addr, a6, sizeof a6);
+        inet_ntop(AF_INET6, ip6.gw, g6, sizeof g6);
+        printf("INFO  IPv6 %s/%d, gateway %s, %d DNS, mtu %u\n", a6, ip6.prefix, ip6.has_gw ? g6 : "-", ip6.ndns, ip6.mtu);
+    } else {
+        printf("INFO  no IPv6 from the network\n");
+    }
+    {
+        uint8_t out[256];
+        uint32_t st = 0, type = 0, state = 0, att = 0;
+        int n = mbim_dev_command(&m, MBIM_CID_PIN, false, NULL, 0, out, sizeof out, &st, 5000);
+        result(n >= 0 && st == 0 && mbim_parse_pin_info(out, (uint32_t)n, &type, &state, &att) == 0,
+               "SIM PIN state: type %u, state %u, %u attempts left", type, state, att);
+    }
+    mbim_link_t link;
+    result(mbim_query_link(&m, &link) == 0, "link: signal %d/4 (rssi %d, %d dBm), provider '%s', %s (data class 0x%x)", link.bars,
+           link.rssi, link.rssi >= 0 ? -113 + 2 * link.rssi : 0, link.provider, mbim_data_class_name(link.data_class),
+           link.data_class);
 
     pthread_create(&rx, NULL, rx_thread, NULL);
     double avg;

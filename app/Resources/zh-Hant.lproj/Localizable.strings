@@ -37,7 +37,10 @@
 "Could not apply network settings" = "無法套用網路設定";
 "Could not talk to the modem over USB" = "無法透過 USB 與數據機溝通";
 "No SIM card in the modem" = "數據機裡沒有 SIM 卡";
-"The SIM card is locked with a PIN; unlock it in another device first" = "SIM 卡有 PIN 碼鎖，請先在其他裝置上解除";
+"The SIM card is locked" = "SIM 卡被鎖住了";
+"The SIM card needs its PIN" = "SIM 卡需要 PIN 碼";
+"The SIM card rejected the PIN" = "SIM 卡不接受這個 PIN 碼";
+"The SIM card needs its PUK; unlock it in a phone" = "SIM 卡需要 PUK 碼，請放進手機解鎖";
 "The modem cannot use the SIM card" = "數據機無法使用這張 SIM 卡";
 "The modem's radio is switched off" = "數據機的無線電被關閉了";
 "The modem could not register with the mobile network" = "數據機無法註冊到行動網路";
@@ -61,3 +64,16 @@
 "App" = "App";
 "Background service" = "背景服務";
 "About" = "關於";
+
+/* 數據機 */
+"Mobile network" = "行動網路";
+"Gateway" = "閘道";
+"Gateway: latency to the mobile network's gateway. Internet: latency to 1.1.1.1 through the modem." = "閘道：到行動網路閘道的延遲。網路：經過數據機連到 1.1.1.1 的延遲。";
+"%d attempts left" = "還可以試 %d 次";
+"Unlock" = "解鎖";
+"Only one attempt left. A wrong PIN locks the SIM until you enter its PUK in a phone." = "只剩一次機會。再輸錯，SIM 卡會被鎖住，要放進手機輸入 PUK 碼才能解開。";
+"4G/5G modem" = "4G/5G 數據機";
+"Ask the network for an IPv6 address as well. Turn off if your carrier refuses the connection." = "同時向網路要 IPv6 位址。如果電信商因此拒絕連線，請關掉。";
+"Saved" = "已儲存";
+"Forget" = "刪除";
+"The APN comes from your carrier; Taiwanese carriers use “internet”. Changing these reconnects the modem." = "APN 由電信商提供，臺灣的電信商都是「internet」。修改後數據機會重新連線。";

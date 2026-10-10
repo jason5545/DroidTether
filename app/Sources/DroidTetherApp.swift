@@ -90,10 +90,18 @@ enum SettingsWindow {
 /// 點選單列圖示後彈出的面板。
 struct PanelView: View {
     @ObservedObject var model: TetherModel
+    @State private var pin = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+
+            if model.isConnected, model.status?.isModem == true {
+                signalRow
+            }
+            if needsPIN {
+                pinEntry
+            }
 
             if model.serviceState == .requiresApproval {
                 notice(NSLocalizedString("Allow Tetherline in System Settings to start the background service.", comment: ""),
@@ -127,6 +135,7 @@ struct PanelView: View {
                 Text(statusTitle).font(.headline)
                 ForEach(statusDetails, id: \.self) { line in
                     Text(line).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        .lineLimit(1).truncationMode(.middle)
                 }
             }
             Spacer(minLength: 0)
@@ -173,6 +182,7 @@ struct PanelView: View {
         case "connected":
             var lines: [String] = []
             if let ip = s?.ip { lines.append("IP \(ip)") }
+            if let ip6 = s?.ipv6, !ip6.isEmpty { lines.append("IPv6 " + (ip6.split(separator: "/").first.map(String.init) ?? ip6)) }
             if let dns = s?.dns, !dns.isEmpty { lines.append("DNS " + dns.joined(separator: ", ")) }
             if s?.config?.primary == false { lines.append(NSLocalizedString("Not used as the main connection", comment: "")) }
             return lines
@@ -189,6 +199,64 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(text).font(.callout)
             Button(action, action: perform)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    // MARK: - 數據機
+
+    private var signalRow: some View {
+        let s = model.status
+        let bars = s?.signalBars ?? -1
+        let name = [s?.carrier, s?.tech].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        return HStack(spacing: 8) {
+            Image(systemName: "cellularbars", variableValue: bars >= 0 ? Double(bars) / 4 : 0)
+                .font(.system(size: 15))
+                .foregroundStyle(bars >= 0 ? Color.primary : Color.secondary)
+            Text(name.isEmpty ? NSLocalizedString("Mobile network", comment: "") : name).font(.callout)
+            Spacer(minLength: 0)
+            if bars >= 0, let dbm = s?.signalDbm, dbm != 0 {
+                Text("\(dbm) dBm").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var needsPIN: Bool {
+        guard model.state == "connecting", let e = model.status?.error else { return false }
+        return e == "sim_pin_required" || e == "sim_pin_wrong"
+    }
+
+    private var pinValid: Bool {
+        (4...8).contains(pin.count) && pin.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    private func submitPIN() {
+        guard pinValid else { return }
+        model.submitSIMPIN(pin)
+        pin = ""
+    }
+
+    // 輸入一次就存起來，之後插上自動解鎖；被拒的 PIN 會被刪掉、不會再試。
+    private var pinEntry: some View {
+        let attempts = model.status?.pinAttempts
+        return VStack(alignment: .leading, spacing: 6) {
+            if let attempts {
+                Text(String(format: NSLocalizedString("%d attempts left", comment: ""), attempts))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                SecureField("SIM PIN", text: $pin)
+                    .onSubmit(submitPIN)
+                    .frame(width: 120)
+                Button("Unlock", action: submitPIN).disabled(!pinValid)
+            }
+            if attempts == 1 {
+                Text("Only one attempt left. A wrong PIN locks the SIM until you enter its PUK in a phone.")
+                    .font(.caption).foregroundStyle(.red)
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -221,11 +289,14 @@ struct PanelView: View {
     private var ping: some View {
         HStack(spacing: 14) {
             Label("Ping", systemImage: "stopwatch").font(.caption).foregroundStyle(.secondary)
-            pingValue(NSLocalizedString("Phone", comment: ""), model.phonePing)
+            pingValue(model.status?.isModem == true ? NSLocalizedString("Gateway", comment: "")
+                                                    : NSLocalizedString("Phone", comment: ""), model.phonePing)
             pingValue(NSLocalizedString("Internet", comment: ""), model.internetPing)
             Spacer(minLength: 0)
         }
-        .help(Text("Phone: latency over the USB cable. Internet: latency to 1.1.1.1 through the phone."))
+        .help(model.status?.isModem == true
+              ? Text("Gateway: latency to the mobile network's gateway. Internet: latency to 1.1.1.1 through the modem.")
+              : Text("Phone: latency over the USB cable. Internet: latency to 1.1.1.1 through the phone."))
     }
 
     private func pingValue(_ label: String, _ ms: Double?) -> some View {
@@ -260,7 +331,10 @@ struct PanelView: View {
         case "netcfg_failed": return NSLocalizedString("Could not apply network settings", comment: "")
         case "mbim_failed": return NSLocalizedString("Could not talk to the modem over USB", comment: "")
         case "sim_missing": return NSLocalizedString("No SIM card in the modem", comment: "")
-        case "sim_locked": return NSLocalizedString("The SIM card is locked with a PIN; unlock it in another device first", comment: "")
+        case "sim_locked": return NSLocalizedString("The SIM card is locked", comment: "")
+        case "sim_pin_required": return NSLocalizedString("The SIM card needs its PIN", comment: "")
+        case "sim_pin_wrong": return NSLocalizedString("The SIM card rejected the PIN", comment: "")
+        case "sim_puk": return NSLocalizedString("The SIM card needs its PUK; unlock it in a phone", comment: "")
         case "sim_failed": return NSLocalizedString("The modem cannot use the SIM card", comment: "")
         case "radio_off": return NSLocalizedString("The modem's radio is switched off", comment: "")
         case "not_registered": return NSLocalizedString("The modem could not register with the mobile network", comment: "")

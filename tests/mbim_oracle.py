@@ -48,15 +48,26 @@ builders = {
 }
 
 
-def connect_set(activate, apn):
+def connect_set(activate, apn, ip_type=1):
     f = fn("mbim_message_connect_set_new", P, U32, U32, C.c_char_p, C.c_char_p, C.c_char_p, U32, U32, U32, P, ERR)
-    return lambda t: f(0, 1 if activate else 0, apn.encode() if apn else None, None, None, 0, 0, 1, CTX_INTERNET, None)
+    return lambda t: f(0, 1 if activate else 0, apn.encode() if apn else None, None, None, 0, 0, ip_type, CTX_INTERNET, None)
+
+
+def pin_enter(pin):
+    f = fn("mbim_message_pin_set_new", P, U32, U32, C.c_char_p, C.c_char_p, ERR)
+    return lambda t: f(2, 0, pin.encode(), None, None)  # MBIM_PIN_TYPE_PIN1, MBIM_PIN_OPERATION_ENTER
 
 
 builders["connect_activate_internet"] = connect_set(True, "internet")
 builders["connect_deactivate"] = connect_set(False, "")
 builders["connect_activate_a"] = connect_set(True, "a")
 builders["connect_activate_fet"] = connect_set(True, "fet")
+builders["connect_activate_internet_v4v6"] = connect_set(True, "internet", 3)
+builders["pin_query"] = lambda t: fn("mbim_message_pin_query_new", P, ERR)(None)
+builders["pin_enter_1234"] = pin_enter("1234")
+builders["pin_enter_12345"] = pin_enter("12345")
+builders["signal_query"] = lambda t: fn("mbim_message_signal_state_query_new", P, ERR)(None)
+builders["device_caps_query"] = lambda t: fn("mbim_message_device_caps_query_new", P, ERR)(None)
 
 # Response fixtures: the fields libmbim must read from them.
 expect = {
@@ -70,6 +81,14 @@ expect = {
     "register_done_home": ["NwError = 'none'", "RegisterState = 'home'"],
     "packet_service_done_attached": ["PacketServiceState = 'attached'"],
     "subscriber_ready_done": ["ReadyState = 'initialized'"],
+    "pin_done_locked": ["PinType = 'pin1'", "PinState = 'locked'", "RemainingAttempts = '3'"],
+    "signal_done": ["Rssi = '14'", "ErrorRate = '99'"],
+    "register_done_named": ["ProviderId = '46697'", "ProviderName = 'TW Mobile'", "RegisterState = 'home'"],
+    "ipcfg6_done": ["OnLinkPrefixLength = '30'", "IPv4Address = '10.21.162.178'", "IPv4Gateway = '10.21.162.177'",
+                    "OnLinkPrefixLength = '64'", "IPv6Address = '2402:7500:4f6:9a73:8c45:3f2d:7a2f:ed8'",
+                    "IPv6Gateway = '2402:7500:4f6:9a73:e965:6ce9:6ebc:bf6d'",
+                    "IPv6DnsServer = '2001:4860:4860::8888, 2001:4860:4860::8844'", "IPv6Mtu = '1500'"],
+    "device_caps_done": ["CustomDataClass = '5G/TDS'"],
 }
 
 

@@ -27,6 +27,7 @@ typedef struct {
     int ndns;
     int mtu;  // 只能從命令列指定，0 表示自動
     char apn[64];  // MBIM 數據機撥號用
+    bool ipv6;     // MBIM 數據機要求 IPv4v6
 } dt_config;
 
 typedef struct {
@@ -39,6 +40,16 @@ typedef struct {
     int ndns;
     bool dns_fallback;  // 手機沒回 DNS，暫時用備用 DNS
     time_t since;
+    // MBIM 數據機才有
+    bool modem;
+    int signal_bars;  // 0～4，-1 表示不知道
+    int signal_dbm;   // 0 表示不知道
+    char carrier[64];
+    char tech[16];
+    char ipv6[64];     // "位址/prefix"，空字串表示沒有
+    char dns6[2][48];  // 數據機給的 IPv6 DNS（configd 會排在 IPv4 前面）
+    int ndns6;
+    int pin_attempts;  // SIM 要 PIN 時剩幾次，-1 表示不知道
 } dt_status;
 
 extern pthread_mutex_t g_state_lock;
@@ -55,6 +66,15 @@ bool config_valid_apn(const char *apn);
 
 // 換狀態；device 或 error 傳 NULL 表示不變。
 void status_set(dt_state st, const char *device, const char *error);
+void status_set_link(int bars, int dbm, const char *carrier, const char *tech);
+
+// SIM PIN 存在設定檔旁邊（<設定檔>.sim-pin，只有 root 能讀寫）。被拒就立刻刪掉，絕不重試。
+extern char g_pin_path[300];
+bool sim_pin_load(char *out, size_t cap);
+int sim_pin_save(const char *pin);
+void sim_pin_forget(void);
+bool sim_pin_saved(void);
+bool sim_pin_valid(const char *pin);
 const char *state_name(dt_state st);
 
 // 背景執行緒：在 DT_SOCKET_PATH 接受 App 的指令。

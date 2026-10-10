@@ -9,6 +9,8 @@ struct DaemonStatus: Decodable, Equatable {
         var wifiOff: Bool?  // 0.3.5 起才有
         var dnsMode: String
         var dnsServers: [String]
+        var apn: String?  // 0.4 起才有
+        var ipv6: Bool?   // 0.4.3 起才有
     }
 
     var ok: Bool
@@ -26,6 +28,17 @@ struct DaemonStatus: Decodable, Equatable {
     var rxBytes: UInt64?
     var txBytes: UInt64?
     var config: Config?
+    // 數據機（0.4.3 起）
+    var kind: String?  // "phone" 或 "modem"
+    var ipv6: String?
+    var signalBars: Int?
+    var signalDbm: Int?
+    var carrier: String?
+    var tech: String?
+    var pinAttempts: Int?
+    var simPinSaved: Bool?
+
+    var isModem: Bool { kind == "modem" }
 }
 
 enum DaemonError: Error {

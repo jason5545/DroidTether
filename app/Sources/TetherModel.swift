@@ -201,6 +201,10 @@ final class TetherModel: ObservableObject {
     func reconnect() { send("reconnect") }
     func useCustomDNS(_ servers: [String]) { send("set dns " + servers.joined(separator: ",")) }
     func usePhoneDNS() { send("set dns phone") }
+    func setAPN(_ apn: String) { send("set apn \(apn)") }
+    func setIPv6(_ on: Bool) { send("set ipv6 \(on ? 1 : 0)") }
+    func submitSIMPIN(_ pin: String) { send("sim pin \(pin)") }
+    func forgetSIMPIN() { send("sim forget-pin") }
 
     func openLog() {
         NSWorkspace.shared.open(URL(fileURLWithPath: TetherModel.logPath))

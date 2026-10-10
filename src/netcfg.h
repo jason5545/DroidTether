@@ -2,6 +2,10 @@
 
 #include "common.h"
 
+// IPv6（數據機才有）：在 netcfg_publish 之前設好，之後的 publish、republish 都會帶上。router 可以是 NULL。
+void netcfg_set_ipv6(const uint8_t addr[16], int prefix, const uint8_t *router, const uint8_t (*dns)[16], int ndns);
+void netcfg_clear_ipv6(void);
+
 // 把 tether 註冊成系統的網路服務（IPv4 + DNS），讓 configd 把它當 primary、
 // 設預設路由、把 DNS 交給 mDNSResponder。用暫存值寫入，行程結束時由 configd 自動移除。
 int netcfg_publish(const char *ifname, uint32_t ip, uint32_t mask, uint32_t router, const uint32_t *dns, int ndns,
