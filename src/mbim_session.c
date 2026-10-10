@@ -230,29 +230,42 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
         goto out;
     }
 
-    // 數據機給的 DNS（電信商的）一樣先直接問一次，沒回應就改用備用 DNS
+    // 電信商的 DNS 不在數據機給的子網路裡（手機的 DNS 就是閘道，不一樣），configd 裝好這個服務的路由之前問不到。
+    // 所以先用它註冊，路由好了再直接問一次，沒回應才改用備用 DNS。2026/10/10 實測：先問再註冊，每次都會白白退回一分鐘。
     uint32_t phone_dns[4];
     int nphone = 0;
     bool fallback = false;
-    if (opt->dns_from_phone) {
-        memcpy(phone_dns, dns, sizeof phone_dns);
-        nphone = ndns;
-        ndns = nphone ? probe_phone_dns(s->net.host, phone_dns, nphone, dns) : 0;
-        if (!ndns) {
-            char fl[80];
-            ndns = fallback_dns(dns);
-            dns_list(fl, sizeof fl, dns, ndns);
-            LOGW("network DNS did not answer; using %s and asking again every %ds", fl, DNS_REPROBE_S);
-            fallback = nphone > 0;
-        }
+    if (opt->dns_from_phone && !ndns) {
+        ndns = fallback_dns(dns);  // 網路沒給 DNS
+        LOGW("network gave no DNS; using public DNS");
     }
-
     if (netcfg_publish(s->net.host, s->ip, mask, s->gw, dns, ndns, opt->primary) != 0) {
         err = "netcfg_failed";
         goto out;
     }
     published = true;
     if (opt->primary) wait_default_route(s->net.host);
+    else sleep_ms_interruptible(500);  // 不當主要連線時 configd 只裝這個介面專用的路由，給它一點時間
+    if (opt->dns_from_phone && ipc.ndns) {
+        memcpy(phone_dns, dns, sizeof phone_dns);
+        nphone = ndns;
+        uint32_t ok_dns[4];
+        int n = probe_phone_dns(s->net.host, phone_dns, nphone, ok_dns);
+        if (!n) {
+            char fl[80];
+            ndns = fallback_dns(dns);
+            dns_list(fl, sizeof fl, dns, ndns);
+            LOGW("network DNS did not answer; using %s and asking again every %ds", fl, DNS_REPROBE_S);
+            fallback = true;
+        } else {
+            ndns = n;
+            memcpy(dns, ok_dns, sizeof dns);
+        }
+        if ((!n || n != nphone) && netcfg_publish(s->net.host, s->ip, mask, s->gw, dns, ndns, opt->primary) != 0) {
+            err = "netcfg_failed";
+            goto out;
+        }
+    }
 
     pthread_mutex_lock(&g_state_lock);
     strlcpy(g_st.ifname, s->net.host, sizeof g_st.ifname);

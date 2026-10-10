@@ -34,7 +34,7 @@ USB modems are the other half. Many can switch to ECM, which macOS supports, but
 
 Tetherline speaks MBIM itself: it opens the modem's control channel, waits for the SIM and network registration, dials with an APN (default `internet`), reads the address the network assigns, and carries IP packets in NTB16 blocks. The Mac side is the same `feth` pair, with the Ethernet headers and ARP replies made up by the daemon, so DNS, the VPN behaviour, Wi-Fi handling and the panel all work the same way. When a modem says it is connected but nothing comes back (some firmware does this every few hours), the daemon notices from unanswered pings while idle and resets the modem over USB.
 
-Status: the MBIM code has run against a TCL LINKKEY IK512 (Qualcomm SDX62) on a Linux host (`tests/mbim_probe.c`: dial, ping 8.8.8.8 and 1.1.1.1, full-size packets, a burst of 50, DNS), and every request it builds matches libmbim byte for byte. The full path on macOS has not been tried yet.
+Tested with a TCL LINKKEY IK512 (Qualcomm SDX62) on Taiwan Mobile, on macOS 26: plugged in, the Mac is online about 3 seconds later, with the carrier's DNS, and the live DNS test (14/14) and VPN test (26/26) pass over the modem. Every request the daemon builds also matches libmbim byte for byte. This modem ignores the MBIM open request until the host has set its NTB input size, which Linux always does while binding, so the daemon does it too.
 
 ## Features
 
@@ -77,7 +77,7 @@ Tetherline.app (menu bar) ⇄ /var/run/droidtetherd.sock ⇄ droidtetherd
 
 - macOS 26 or later on Apple Silicon. That is what it is built for and tested on (deployment target 26.0, arm64).
 - An Android phone that tethers over RNDIS (USB interface class `EF/04/01`, `E0/01/03` or `02/02/FF`). Tested with a POCO F8 Ultra on HyperOS.
-- Or a USB modem in MBIM mode (interface class `02/0E/00`) with a SIM that does not need a PIN. See the status note above.
+- Or a USB modem in MBIM mode (interface class `02/0E/00`) with a SIM that does not need a PIN. Tested with a TCL LINKKEY IK512.
 - To build: the Xcode command line tools (Swift 6), `libusb` from Homebrew, and an Apple Development code-signing identity. I have only tested the `SMAppService` background service with a properly signed app.
 
 ## Download
@@ -231,7 +231,7 @@ Tetherline 的做法：
 
 Tetherline 自己處理 MBIM：開控制通道、等 SIM 和註冊、用 APN 撥號（預設 `internet`，臺灣的電信商都用這個）、讀網路配的位址，資料用 NTB16 收送。Mac 這端一樣是 `feth`，乙太網路標頭和 ARP 由 daemon 補，所以 DNS、VPN、Wi-Fi 和面板的行為都跟手機一樣。數據機有時會「顯示連著但不通」，閒置時 ping 不回來，daemon 會透過 USB 把它重置。
 
-目前進度：MBIM 的程式碼已經在 Linux 主機上接 TCL LINKKEY IK512（高通 SDX62）實際跑過（`tests/mbim_probe.c`：撥號、ping 8.8.8.8 和 1.1.1.1、滿載封包、連發 50 個、DNS），組出來的每種請求都跟 libmbim 逐位元組相同。macOS 上的完整流程還沒試。
+實測：TCL LINKKEY IK512（高通 SDX62）、台灣大哥大、macOS 26。插上後大約 3 秒連上，DNS 用電信商的，透過數據機跑即時 DNS 測試 14/14、VPN 測試 26/26。daemon 組出來的每種請求也都跟 libmbim 逐位元組相同。這張網卡要主機先設定 NTB 接收大小才肯回 MBIM 的 OPEN；Linux 綁定驅動時一定會送，所以 daemon 也照做。
 
 ### 功能
 

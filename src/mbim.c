@@ -434,6 +434,8 @@ bool icmp_is_echo_reply(const uint8_t *ip, int len, uint32_t to, uint16_t id) {
 #define CDC_SEND_ENCAPSULATED_COMMAND 0x00
 #define CDC_GET_ENCAPSULATED_RESPONSE 0x01
 #define CDC_GET_NTB_PARAMETERS 0x80
+#define CDC_SET_NTB_INPUT_SIZE 0x86
+#define NTB_INPUT_SIZE 16384  // 跟 Linux cdc_ncm 的預設 rx_max 一樣
 #define CDC_NOTIFY_RESPONSE_AVAILABLE 0x01
 #define RESP_BUF 16384
 
@@ -466,6 +468,7 @@ static int fetch_response(mbim_dev_t *d) {
     int n = libusb_control_transfer(d->u->h, 0xA1, CDC_GET_ENCAPSULATED_RESPONSE, 0, (uint16_t)d->u->comm_if, buf,
                                     (uint16_t)d->max_ctrl, 2000);
     if (n == LIBUSB_ERROR_NO_DEVICE) d->dead = true;
+    if (n != LIBUSB_ERROR_PIPE) LOGD("MBIM: GET_ENCAPSULATED_RESPONSE -> %d %s", n, n < 0 ? libusb_error_name(n) : "");
     if (n > 0) {
         int r = mbim_reasm_feed(&d->reasm, buf, n);
         if (r == 1) dispatch(d, d->reasm.buf, d->reasm.len);
@@ -486,6 +489,7 @@ static void *notify_thread(void *arg) {
             d->dead = true;
             break;
         }
+        LOGD("MBIM: notification rc %d, %d bytes, %02x %02x", rc, got, got > 0 ? buf[0] : 0, got > 1 ? buf[1] : 0);
         if (rc != 0) {
             if (rc == LIBUSB_ERROR_PIPE) libusb_clear_halt(d->u->h, d->u->ep_int);
             usleep(100000);
@@ -563,6 +567,7 @@ static int transact(mbim_dev_t *d, uint8_t *msg, int len, uint8_t *out, int cap,
                                      (uint16_t)len, 2000);
     pthread_mutex_unlock(&d->ctrl_lock);
     if (rc == LIBUSB_ERROR_NO_DEVICE) d->dead = true;
+    LOGD("MBIM: sent type %08x tid %u (%d bytes) -> %d", get_le32(msg), tid, len, rc);
     if (rc != len) {
         LOGD("MBIM: send failed (%s)", rc < 0 ? libusb_error_name(rc) : "short");
         pthread_mutex_lock(&d->lock);
@@ -767,7 +772,14 @@ int mbim_data_start(usbdev_t *u, ntb_params_t *np) {
         LOGE("MBIM: cannot read NTB parameters (%s)", n < 0 ? libusb_error_name(n) : "short or unsupported");
         return -1;
     }
-    int rc = libusb_set_interface_alt_setting(u->h, u->data_if, u->data_alt);
+    // IK512（高通 SDX62）沒收到這個請求就不回 MBIM OPEN；Linux 的 cdc_ncm 在綁定時一定會送，
+    // 所以在 Linux 上看不出來。2026/10/10 在 macOS 上實測：少了它 OPEN 等 60 秒都沒回，加上後 0.4 秒回。
+    uint8_t sz[4];
+    put_le32(sz, NTB_INPUT_SIZE);
+    int rc = libusb_control_transfer(u->h, 0x21, CDC_SET_NTB_INPUT_SIZE, 0, (uint16_t)u->comm_if, sz, sizeof sz, 2000);
+    if (rc == (int)sizeof sz && np->in_max > NTB_INPUT_SIZE) np->in_max = NTB_INPUT_SIZE;
+    else if (rc != (int)sizeof sz) LOGW("MBIM: SET_NTB_INPUT_SIZE failed (%s)", rc < 0 ? libusb_error_name(rc) : "short");
+    rc = libusb_set_interface_alt_setting(u->h, u->data_if, u->data_alt);
     if (rc != 0) {
         LOGE("MBIM: cannot enable data interface: %s", libusb_error_name(rc));
         return -1;
