@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 
 @main
 struct DroidTetherApp: App {
@@ -60,11 +61,29 @@ struct DroidTetherApp: App {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = self
+    }
+
     /// 使用者從 Finder / Spotlight 再打開已經在跑的 App，就直接給設定視窗。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         SettingsWindow.show()
         return false
+    }
+
+    /// App 在前景時也照樣跳出簡訊通知。
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound, .list])
+    }
+
+    /// 點簡訊通知：打開簡訊視窗，直接到那段對話。
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let number = response.notification.request.content.userInfo["number"] as? String
+        Task { @MainActor in MessagesWindow.show(number: number) }
+        completionHandler()
     }
 }
 
@@ -98,6 +117,9 @@ struct PanelView: View {
 
             if model.isConnected, model.status?.isModem == true {
                 signalRow
+            }
+            if model.smsAvailable {
+                messagesRow
             }
             if needsPIN {
                 pinEntry
@@ -222,6 +244,34 @@ struct PanelView: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    // 用純 SwiftUI 畫，不用 Button：截圖（ImageRenderer）也畫得出來。
+    private var messagesRow: some View {
+        let unread = model.smsUnread
+        return HStack(spacing: 8) {
+            Image(systemName: "message")
+                .font(.system(size: 14))
+                .frame(width: 17)
+            Text("Messages").font(.callout)
+            if unread > 0 {
+                Text("\(unread)")
+                    .font(.caption.bold().monospacedDigit())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Color.red, in: Capsule())
+            }
+            if model.status?.smsFull == true {
+                Text("Modem storage full").font(.caption).foregroundStyle(.orange)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { MessagesWindow.show() }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
     }
 
     private var needsPIN: Bool {

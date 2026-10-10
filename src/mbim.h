@@ -58,7 +58,30 @@
 #define MBIM_PIN_TYPE_PUK1 11
 #define MBIM_PIN_STATE_LOCKED 1
 
+// SMS 服務的 CID
+#define MBIM_CID_SMS_CONFIGURATION 1
+#define MBIM_CID_SMS_READ 2
+#define MBIM_CID_SMS_SEND 3
+#define MBIM_CID_SMS_DELETE 4
+#define MBIM_CID_SMS_MESSAGE_STORE_STATUS 5
+
+// SMS_READ、SMS_DELETE 的 Flag
+#define MBIM_SMS_FLAG_ALL 0
+#define MBIM_SMS_FLAG_INDEX 1
+#define MBIM_SMS_FLAG_NEW 2
+
+// SMS_RECEIVE_INFO 每一筆的 MessageStatus
+#define MBIM_SMS_STATUS_NEW 0
+#define MBIM_SMS_STATUS_OLD 1
+#define MBIM_SMS_STATUS_DRAFT 2
+#define MBIM_SMS_STATUS_SENT 3
+
+// SMS_MESSAGE_STORE_STATUS 的 Flag（bitmask）
+#define MBIM_SMS_STORE_FULL 1
+#define MBIM_SMS_STORE_NEW_MESSAGE 2
+
 extern const uint8_t MBIM_UUID_BASIC_CONNECT[16];
+extern const uint8_t MBIM_UUID_SMS[16];
 extern const uint8_t MBIM_CONTEXT_INTERNET[16];
 
 // ---------- 訊息組裝 ----------
@@ -76,6 +99,12 @@ int mbim_info_connect_query(uint8_t *p, int cap, uint32_t session);
 int mbim_info_ip_config_query(uint8_t *p, int cap, uint32_t session);
 // 輸入 SIM PIN1（MBIM_SET_PIN，PinOperation enter）。PIN 只能是 4～8 位數字。
 int mbim_info_pin_enter(uint8_t *p, int cap, const char *pin);
+// MBIM_SMS_READ_REQ：只用 PDU 格式。flag 是 MBIM_SMS_FLAG_*，index 只在 FLAG_INDEX 時有意義。
+int mbim_info_sms_read(uint8_t *p, uint32_t flag, uint32_t index);
+// MBIM_SET_SMS_DELETE
+int mbim_info_sms_delete(uint8_t *p, uint32_t flag, uint32_t index);
+// MBIM_SET_SMS_SEND（PDU 格式）。pdu 以 SMSC 欄位開頭（src/sms.c 的 sms_encode_submit 編出來的）。
+int mbim_info_sms_send(uint8_t *p, int cap, const uint8_t *pdu, int len);
 
 // ---------- 訊息解析 ----------
 
@@ -144,6 +173,28 @@ int mbim_parse_provider_name(const uint8_t *p, uint32_t n, char *out, int cap);
 // PACKET_SERVICE 回應裡的 HighestAvailableDataClass。
 int mbim_parse_data_class(const uint8_t *p, uint32_t n, uint32_t *cls);
 const char *mbim_data_class_name(uint32_t cls);
+
+// MBIM_SMS_CONFIGURATION_INFO
+typedef struct {
+    uint32_t storage_state;  // 1 表示 SIM／數據機的簡訊儲存區準備好了
+    uint32_t format;         // 0 PDU
+    uint32_t max_messages;
+    char smsc[32];
+} mbim_sms_config_t;
+int mbim_parse_sms_config(const uint8_t *p, uint32_t n, mbim_sms_config_t *c);
+// MBIM_SMS_STATUS_INFO（查詢的回應與 indication）
+int mbim_parse_sms_store_status(const uint8_t *p, uint32_t n, uint32_t *flag, uint32_t *index);
+
+typedef struct {
+    uint32_t index, status;  // 數據機裡的位置、MBIM_SMS_STATUS_*
+    const uint8_t *pdu;      // 指向 p 裡面
+    uint32_t len;
+} mbim_sms_record_t;
+// MBIM_SMS_RECEIVE_INFO（READ 的回應與 indication）：最多 max 筆，回傳筆數。格式不是 PDU 或標頭錯誤回傳 -1；
+// 個別壞掉的紀錄跳過（還留在數據機裡）。
+int mbim_parse_sms_read(const uint8_t *p, uint32_t n, mbim_sms_record_t *out, int max);
+// MBIM_SMS_SEND_INFO
+int mbim_parse_sms_send(const uint8_t *p, uint32_t n, uint32_t *msg_ref);
 
 // 子網路遮罩（network order）：數據機給的 prefix 不一定把閘道包進來（例如 /32），那就放寬到包得住為止。
 uint32_t mbim_netmask(uint32_t ip, uint32_t gw, int prefix);
@@ -215,10 +266,10 @@ void mbim_dev_stop(mbim_dev_t *d);
 int mbim_dev_open(mbim_dev_t *d);
 void mbim_dev_close(mbim_dev_t *d);
 
-// 送一個 Basic Connect 指令，回應的 InformationBuffer 複製到 out，回傳長度；*status 是裝置回的 Status。
-// 傳輸失敗或逾時回傳 -1。
-int mbim_dev_command(mbim_dev_t *d, uint32_t cid, bool set, const uint8_t *info, int info_len, uint8_t *out, int cap,
-                     uint32_t *status, int timeout_ms);
+// 送一個指令給 uuid 這個服務（Basic Connect、SMS），回應的 InformationBuffer 複製到 out，回傳長度；
+// *status 是裝置回的 Status。傳輸失敗或逾時回傳 -1。
+int mbim_dev_command(mbim_dev_t *d, const uint8_t uuid[16], uint32_t cid, bool set, const uint8_t *info, int info_len,
+                     uint8_t *out, int cap, uint32_t *status, int timeout_ms);
 
 typedef struct {
     const char *apn;

@@ -272,7 +272,7 @@ int main(int argc, char **argv) {
     {
         uint8_t out[256];
         uint32_t st = 0, type = 0, state = 0, att = 0;
-        int n = mbim_dev_command(&m, MBIM_CID_PIN, false, NULL, 0, out, sizeof out, &st, 5000);
+        int n = mbim_dev_command(&m, MBIM_UUID_BASIC_CONNECT, MBIM_CID_PIN, false, NULL, 0, out, sizeof out, &st, 5000);
         result(n >= 0 && st == 0 && mbim_parse_pin_info(out, (uint32_t)n, &type, &state, &att) == 0,
                "SIM PIN state: type %u, state %u, %u attempts left", type, state, att);
     }

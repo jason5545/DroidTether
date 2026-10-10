@@ -1,4 +1,5 @@
-// 不需要裝置的 MBIM 測試：訊息組裝與解析、分段重組、NTB16、feth 端的 ARP 與乙太網路標頭、ICMP 探測。
+// 不需要裝置的 MBIM 測試：訊息組裝與解析、分段重組、NTB16、feth 端的 ARP 與乙太網路標頭、ICMP 探測、
+// 簡訊（SMS 服務的訊息與 3GPP TS 23.040 的 PDU 編解碼，PDU 對照 ModemManager 測試裡的真實簡訊與期待值）。
 // REAL_* 是 TCL IK512（高通 SDX62）實際收發的位元組，2026/10/10 從 Linux 主機上的 mbimcli --verbose-full 取得。
 // 撥號、附著這些不能真的送出去的指令，用 tests/mbim_oracle.py 跟 libmbim 逐位元組對照：
 //   build/test_mbim           跑測試
@@ -10,6 +11,7 @@
 
 #include "../src/dhcp.h"
 #include "../src/mbim.h"
+#include "../src/sms.h"
 
 int g_verbose;
 atomic_bool g_stop;
@@ -79,8 +81,8 @@ static const uint8_t REAL_RADIO_DONE[56] = {
 
 // ---------- 自己組的回應（版面由 mbim_oracle.py 交給 libmbim 解讀確認） ----------
 
-static int done_msg(uint8_t *b, uint32_t type, uint32_t tid, uint32_t cid, uint32_t status, const uint8_t *info,
-                    int n) {
+static int svc_msg(uint8_t *b, const uint8_t uuid[16], uint32_t type, uint32_t tid, uint32_t cid, uint32_t status,
+                   const uint8_t *info, int n) {
     bool ind = type == MBIM_INDICATE_STATUS;
     int hdr = ind ? 44 : 48;
     put_le32(b, type);
@@ -88,7 +90,7 @@ static int done_msg(uint8_t *b, uint32_t type, uint32_t tid, uint32_t cid, uint3
     put_le32(b + 8, tid);
     put_le32(b + 12, 1);
     put_le32(b + 16, 0);
-    memcpy(b + 20, MBIM_UUID_BASIC_CONNECT, 16);
+    memcpy(b + 20, uuid, 16);
     put_le32(b + 36, cid);
     if (ind) {
         put_le32(b + 40, (uint32_t)n);
@@ -98,6 +100,11 @@ static int done_msg(uint8_t *b, uint32_t type, uint32_t tid, uint32_t cid, uint3
     }
     memcpy(b + hdr, info, (size_t)n);
     return hdr + n;
+}
+
+static int done_msg(uint8_t *b, uint32_t type, uint32_t tid, uint32_t cid, uint32_t status, const uint8_t *info,
+                    int n) {
+    return svc_msg(b, MBIM_UUID_BASIC_CONNECT, type, tid, cid, status, info, n);
 }
 
 static int connect_info(uint8_t *p, uint32_t activation, uint32_t nw_error) {
@@ -241,6 +248,143 @@ static int fx_device_caps_done(uint8_t *b) {
     return done_msg(b, MBIM_COMMAND_DONE, 24, MBIM_CID_DEVICE_CAPS, 0, i, sizeof i);
 }
 
+// ---------- 簡訊 ----------
+
+// ModemManager 的 src/tests/test-sms-part-3gpp.c 裡的 PDU（真實收到的簡訊），期待值照它的 assert。
+// 收到的是 SMS-DELIVER，開頭都帶 SMSC 欄位，MBIM 讀出來的就是這個格式。
+static const uint8_t MM_PDU1[] = {  // GSM 7-bit，有擴充表的字元
+    0x07, 0x91, 0x21, 0x04, 0x44, 0x29, 0x61, 0xf4, 0x04, 0x0b, 0x91, 0x61, 0x71, 0x95, 0x72, 0x91, 0xf8, 0x00, 0x00,
+    0x11, 0x20, 0x82, 0x11, 0x05, 0x05, 0x0a, 0x6a, 0xc8, 0xb2, 0xbc, 0x7c, 0x9a, 0x83, 0xc2, 0x20, 0xf6, 0xdb, 0x7d,
+    0x2e, 0xcb, 0x41, 0xed, 0xf2, 0x7c, 0x1e, 0x3e, 0x97, 0x41, 0x1b, 0xde, 0x06, 0x75, 0x4f, 0xd3, 0xd1, 0xa0, 0xf9,
+    0xbb, 0x5d, 0x06, 0x95, 0xf1, 0xf4, 0xb2, 0x9b, 0x5c, 0x26, 0x83, 0xc6, 0xe8, 0xb0, 0x3c, 0x3c, 0xa6, 0x97, 0xe5,
+    0xf3, 0x4d, 0x6a, 0xe3, 0x03, 0xd1, 0xd1, 0xf2, 0xf7, 0xdd, 0x0d, 0x4a, 0xbb, 0x59, 0xa0, 0x79, 0x7d, 0x8c, 0x06,
+    0x85, 0xe7, 0xa0, 0x00, 0x28, 0xec, 0x26, 0x83, 0x2a, 0x96, 0x0b, 0x28, 0xec, 0x26, 0x83, 0xbe, 0x60, 0x50, 0x78,
+    0x0e, 0xba, 0x97, 0xd9, 0x6c, 0x17};
+static const uint8_t MM_PDU2[] = {  // 英數字寄件者、UCS-2
+    0x07, 0x91, 0x97, 0x30, 0x07, 0x11, 0x11, 0xf1, 0x04, 0x14, 0xd0, 0x49, 0x37, 0xbd, 0x2c, 0x77, 0x97, 0xe9, 0xd3,
+    0xe6, 0x14, 0x00, 0x08, 0x11, 0x30, 0x92, 0x91, 0x02, 0x40, 0x61, 0x08, 0x04, 0x42, 0x04, 0x35, 0x04, 0x41, 0x04,
+    0x42};
+static const uint8_t MM_PDU3[] = {
+    0x07, 0x91, 0x21, 0x43, 0x65, 0x87, 0x09, 0xf1, 0x04, 0x0b, 0x91, 0x81, 0x00, 0x55, 0x15, 0x12,
+    0xf2, 0x00, 0x00, 0x11, 0x10, 0x10, 0x21, 0x43, 0x65, 0x00, 0x0a, 0xe8, 0x32, 0x9b, 0xfd, 0x46,
+    0x97, 0xd9, 0xec, 0x37};
+static const uint8_t MM_DCSF1[] = {  // TP-DCS 0xF1（class 1，GSM 7-bit），法文
+    0x07, 0x91, 0x33, 0x06, 0x09, 0x10, 0x93, 0xF0, 0x04, 0x04, 0x85, 0x81, 0x00, 0x00, 0xF1, 0x11, 0x60, 0x42,
+    0x31, 0x80, 0x51, 0x80, 0xA0, 0x49, 0xB7, 0xF9, 0x0D, 0x9A, 0x1A, 0xA5, 0xA0, 0x16, 0x68, 0xF8, 0x76, 0x9B,
+    0xD3, 0xE4, 0xB2, 0x9B, 0x9E, 0x2E, 0xB3, 0x59, 0xA0, 0x3F, 0xC8, 0x5D, 0x06, 0xA9, 0xC3, 0xED, 0x70, 0x7A,
+    0x0E, 0xA2, 0xCB, 0xC3, 0xEE, 0x79, 0xBB, 0x4C, 0xA7, 0xCB, 0xCB, 0xA0, 0x56, 0x43, 0x61, 0x7D, 0xA7, 0xC7,
+    0x69, 0x90, 0xFD, 0x4D, 0x97, 0x97, 0x41, 0xEE, 0x77, 0xDD, 0x5E, 0x0E, 0xD7, 0x41, 0xED, 0x37, 0x1D, 0x44,
+    0x2E, 0x83, 0xE0, 0xE1, 0xF9, 0xBC, 0x0C, 0xD2, 0x81, 0xE6, 0x77, 0xD9, 0xB8, 0x4C, 0x06, 0xC1, 0xDF, 0x75,
+    0x39, 0xE8, 0x5C, 0x90, 0x97, 0xE5, 0x20, 0xFB, 0x9B, 0x2E, 0x2F, 0x83, 0xC6, 0xEF, 0x36, 0x9C, 0x5E, 0x06,
+    0x4D, 0x8D, 0x52, 0xD0, 0xBC, 0x2E, 0x07, 0xDD, 0xEF, 0x77, 0xD7, 0xDC, 0x2C, 0x77, 0x99, 0xE5, 0xA0, 0x77,
+    0x1D, 0x04, 0x0F, 0xCB, 0x41, 0xF4, 0x02, 0xBB, 0x00, 0x47, 0xBF, 0xDD, 0x65, 0x50, 0xB8, 0x0E, 0xCA, 0xD9,
+    0x66};
+// KPN 的歡迎簡訊：16-bit reference 的多段簡訊（UDH 7 octets，GSM 7-bit 剛好沒有補位）
+static const char *MM_UDHI =
+    "07911356131313F64004850120390011609232239180A006080400100201D7327BFD6EB340E232"
+    "1BF46E83EA7790F59D1E97DBE1341B442F83C465763D3DA797E56537C81D0ECB41AB59CC1693C1"
+    "6031D96C064241E5656838AF03A96230982A269BCD462917C8FA4E8FCBED709A0D7ABBE9F6B0FB"
+    "5C7683D27350984D4FABC9A0B33C4C4FCF5D20EBFB2D079DCB62793DBD06D9C36E50FB2D4E97D9"
+    "A0B49B5E96BBCB";
+// 8-bit reference 的兩段簡訊（UDH 6 octets，GSM 7-bit 要補 1 個位元）
+static const char *MM_MULTI1 =
+    "07912160130320F5440B916171056429F5000021405291650569A00500034C0201A9E8F41C949E"
+    "83C2207B599E07B1DFEE33885E9ED341E4F23C7D7697C920FA1B54C697E5E3F4BC0C6AD7D9F434"
+    "081E96D341E3303C2C4EB3D3F4BC0B94A483E6E8779D4D06CDD1EF3BA80E0785E7A0B7BB0C6A97"
+    "E7F3F0B9CC02B9DF7450780EA2DFDF2C50780EA2A3CBA0BA9B5C96B3F369F71954768FDFE4B4FB"
+    "0C9297E1F2F2BCECA6CF41";
+static const char *MM_MULTI2 =
+    "07912160130320F6440B916171056429F5000021405291651569320500034C0202E9E8301D4447"
+    "9741F0B09C3E0785E56590BCCC0ED3CB6410FD0D7ABBCBA0B0FB4D4797E52E10";
+static const char *MM_MULTI_TEXT1 =
+    "This is a very long test designed to exercise multi part capability. It should "
+    "show up as one message, not as two, as the underlying encoding represents ";
+static const char *MM_MULTI_TEXT2 = "that the parts are related to one another. ";
+static const char *MM_STORED_SUBMIT =  // 存在數據機裡的 SMS-SUBMIT，中文
+    "002100098136397339F70008224F60597D4F60597D4F60597D4F60597D4F60597D4F60597D4F60597D4F60597D4F60";
+static const char *MM_STATUS_REPORT = "07914356060013F1065A098136397339F7219011700463802190117004638030";
+
+// 自己組的台灣簡訊：0912345678 傳來「測試😀」（UCS-2，emoji 是 surrogate pair），2026-10-10 12:34:56 +08
+static const uint8_t TW_PDU[] = {0x00, 0x04, 0x0A, 0x81, 0x90, 0x21, 0x43, 0x65, 0x87, 0x00, 0x08, 0x62, 0x01, 0x01,
+                                 0x21, 0x43, 0x65, 0x23, 0x08, 0x6E, 0x2C, 0x8A, 0x66, 0xD8, 0x3D, 0xDE, 0x00};
+
+static int unhex(const char *h, uint8_t *out) {
+    int n = 0;
+    for (; h[0] && h[1]; h += 2) {
+        unsigned v;
+        sscanf(h, "%2x", &v);
+        out[n++] = (uint8_t)v;
+    }
+    return n;
+}
+
+// SMS_CONFIGURATION 回應，數值是 IK512 在 Mac 上實際回的（2026/10/10）：儲存區就緒、PDU、40 則、台灣大哥大的簡訊中心
+static int fx_sms_config_done(uint8_t *b) {
+    uint8_t i[52] = {0};
+    put_le32(i, 1);
+    put_le32(i + 8, 40);
+    int n = put_utf16(i + 24, "+886935874443");
+    put_le32(i + 16, 24);
+    put_le32(i + 20, (uint32_t)n);
+    return svc_msg(b, MBIM_UUID_SMS, MBIM_COMMAND_DONE, 30, MBIM_CID_SMS_CONFIGURATION, 0, i, sizeof i);
+}
+
+// 有新簡訊：MESSAGE_STORE_STATUS 的 indication，Flag new-message、位置 3
+static int fx_sms_store_indication(uint8_t *b) {
+    uint8_t i[8];
+    put_le32(i, MBIM_SMS_STORE_NEW_MESSAGE);
+    put_le32(i + 4, 3);
+    return svc_msg(b, MBIM_UUID_SMS, MBIM_INDICATE_STATUS, 0, MBIM_CID_SMS_MESSAGE_STORE_STATUS, 0, i, sizeof i);
+}
+
+// SMS_READ 回應：兩筆，位置 3（新的，MM_PDU3）與位置 4（讀過的，TW_PDU，27 bytes 要補到 28）
+static int fx_sms_read_done(uint8_t *b) {
+    uint8_t i[160] = {0};
+    int r1 = 24, l1 = 16 + (int)sizeof MM_PDU3, r2 = r1 + l1, l2 = 16 + (int)sizeof TW_PDU;
+    put_le32(i + 4, 2);
+    put_le32(i + 8, (uint32_t)r1);
+    put_le32(i + 12, (uint32_t)l1);
+    put_le32(i + 16, (uint32_t)r2);
+    put_le32(i + 20, (uint32_t)l2);
+    put_le32(i + r1, 3);
+    put_le32(i + r1 + 4, MBIM_SMS_STATUS_NEW);
+    put_le32(i + r1 + 8, 16);
+    put_le32(i + r1 + 12, sizeof MM_PDU3);
+    memcpy(i + r1 + 16, MM_PDU3, sizeof MM_PDU3);
+    put_le32(i + r2, 4);
+    put_le32(i + r2 + 4, MBIM_SMS_STATUS_OLD);
+    put_le32(i + r2 + 8, 16);
+    put_le32(i + r2 + 12, sizeof TW_PDU);
+    memcpy(i + r2 + 16, TW_PDU, sizeof TW_PDU);
+    int n = (r2 + l2 + 3) & ~3;
+    return svc_msg(b, MBIM_UUID_SMS, MBIM_COMMAND_DONE, 32, MBIM_CID_SMS_READ, 0, i, n);
+}
+
+static int fx_sms_send_done(uint8_t *b) {
+    uint8_t i[4];
+    put_le32(i, 7);
+    return svc_msg(b, MBIM_UUID_SMS, MBIM_COMMAND_DONE, 37, MBIM_CID_SMS_SEND, 0, i, sizeof i);
+}
+
+// ModemManager 測試裡編好的 SMS-SUBMIT（PDU creator 的期待值）
+static const uint8_t MM_SUBMIT_GSM_NO_VP[] = {  // "+15556661234"、"This is really cool ΔΔΔΔΔ"、不帶有效期
+    0x00, 0x01, 0x00, 0x0B, 0x91, 0x51, 0x55, 0x66, 0x16, 0x32, 0xF4, 0x00, 0x00, 0x19, 0x54, 0x74, 0x7A, 0x0E,
+    0x4A, 0xCF, 0x41, 0xF2, 0x72, 0x98, 0xCD, 0xCE, 0x83, 0xC6, 0xEF, 0x37, 0x1B, 0x04, 0x81, 0x40, 0x20, 0x10};
+static const uint8_t MM_SUBMIT_GSM3[] = {  // 同上，有效期 5 分鐘（TP-VP 0）：最後一個 septet 自己占一個 octet
+    0x00, 0x11, 0x00, 0x0B, 0x91, 0x51, 0x55, 0x66, 0x16, 0x32, 0xF4, 0x00, 0x00, 0x00, 0x19, 0x54, 0x74, 0x7A, 0x0E,
+    0x4A, 0xCF, 0x41, 0xF2, 0x72, 0x98, 0xCD, 0xCE, 0x83, 0xC6, 0xEF, 0x37, 0x1B, 0x04, 0x81, 0x40, 0x20, 0x10};
+static const uint8_t MM_SUBMIT_GSM[] = {  // "+15555551234"，有效期 5 分鐘
+    0x00, 0x11, 0x00, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x15, 0x32, 0xF4, 0x00, 0x00, 0x00, 0x36, 0xC8, 0x34, 0x88,
+    0x8E, 0x2E, 0xCB, 0xCB, 0x2E, 0x97, 0x8B, 0x5A, 0x2F, 0x83, 0x62, 0x37, 0x3A, 0x1A, 0xA4, 0x0C, 0xBB, 0x41,
+    0x32, 0x58, 0x4C, 0x06, 0x82, 0xD5, 0x74, 0x33, 0x98, 0x2B, 0x86, 0x03, 0xC1, 0xDB, 0x20, 0xD4, 0xB1, 0x49,
+    0x5D, 0xC5, 0x52, 0x20, 0x08, 0x04, 0x02, 0x81, 0x00};
+static const uint8_t MM_SUBMIT_UCS2[] = {  // "+15555551234"，俄文，有效期 5 分鐘
+    0x00, 0x11, 0x00, 0x0B, 0x91, 0x51, 0x55, 0x55, 0x15, 0x32, 0xF4, 0x00, 0x08, 0x00, 0x3A, 0x04, 0x14, 0x04,
+    0x30, 0x00, 0x20, 0x04, 0x37, 0x04, 0x34, 0x04, 0x40, 0x04, 0x30, 0x04, 0x32, 0x04, 0x41, 0x04, 0x42, 0x04,
+    0x32, 0x04, 0x43, 0x04, 0x35, 0x04, 0x42, 0x00, 0x20, 0x04, 0x3A, 0x04, 0x3E, 0x04, 0x40, 0x04, 0x3E, 0x04,
+    0x3B, 0x04, 0x4C, 0x00, 0x2C, 0x00, 0x20, 0x04, 0x34, 0x04, 0x35, 0x04, 0x42, 0x04, 0x3A, 0x04, 0x30, 0x00,
+    0x21};
+
 // ---------- 給 mbim_oracle.py 的請求 ----------
 
 static int req_connect_type(uint8_t *b, uint32_t tid, bool activate, const char *apn, uint32_t type) {
@@ -310,6 +454,33 @@ static int dump(void) {
     hex("resp", "register_done_named", b, fx_register_named(b));
     hex("resp", "ipcfg6_done", b, fx_ipcfg6_done(b));
     hex("resp", "device_caps_done", b, fx_device_caps_done(b));
+
+    hex("req", "sms_config_query", b,
+        mbim_build_command(b, sizeof b, 30, MBIM_UUID_SMS, MBIM_CID_SMS_CONFIGURATION, false, NULL, 0));
+    hex("req", "sms_store_status_query", b,
+        mbim_build_command(b, sizeof b, 31, MBIM_UUID_SMS, MBIM_CID_SMS_MESSAGE_STORE_STATUS, false, NULL, 0));
+    il = mbim_info_sms_read(info, MBIM_SMS_FLAG_ALL, 0);
+    hex("req", "sms_read_all", b, mbim_build_command(b, sizeof b, 32, MBIM_UUID_SMS, MBIM_CID_SMS_READ, false, info, il));
+    il = mbim_info_sms_read(info, MBIM_SMS_FLAG_INDEX, 3);
+    hex("req", "sms_read_index_3", b, mbim_build_command(b, sizeof b, 33, MBIM_UUID_SMS, MBIM_CID_SMS_READ, false, info, il));
+    il = mbim_info_sms_read(info, MBIM_SMS_FLAG_NEW, 0);
+    hex("req", "sms_read_new", b, mbim_build_command(b, sizeof b, 34, MBIM_UUID_SMS, MBIM_CID_SMS_READ, false, info, il));
+    il = mbim_info_sms_delete(info, MBIM_SMS_FLAG_INDEX, 3);
+    hex("req", "sms_delete_index_3", b, mbim_build_command(b, sizeof b, 35, MBIM_UUID_SMS, MBIM_CID_SMS_DELETE, true, info, il));
+    il = mbim_info_sms_delete(info, MBIM_SMS_FLAG_ALL, 0);
+    hex("req", "sms_delete_all", b, mbim_build_command(b, sizeof b, 36, MBIM_UUID_SMS, MBIM_CID_SMS_DELETE, true, info, il));
+    // 送出去的 PDU 用 ModemManager 的期待值：73 bytes（補 3）與 37 bytes（補 3）、36 bytes（不用補）
+    il = mbim_info_sms_send(info, sizeof info, MM_SUBMIT_UCS2, sizeof MM_SUBMIT_UCS2);
+    hex("req", "sms_send_ucs2", b, mbim_build_command(b, sizeof b, 37, MBIM_UUID_SMS, MBIM_CID_SMS_SEND, true, info, il));
+    il = mbim_info_sms_send(info, sizeof info, MM_SUBMIT_GSM3, sizeof MM_SUBMIT_GSM3);
+    hex("req", "sms_send_gsm", b, mbim_build_command(b, sizeof b, 38, MBIM_UUID_SMS, MBIM_CID_SMS_SEND, true, info, il));
+    il = mbim_info_sms_send(info, sizeof info, MM_SUBMIT_GSM_NO_VP, sizeof MM_SUBMIT_GSM_NO_VP);
+    hex("req", "sms_send_gsm_no_vp", b, mbim_build_command(b, sizeof b, 39, MBIM_UUID_SMS, MBIM_CID_SMS_SEND, true, info, il));
+
+    hex("resp", "sms_config_done", b, fx_sms_config_done(b));
+    hex("resp", "sms_store_indication", b, fx_sms_store_indication(b));
+    hex("resp", "sms_read_done", b, fx_sms_read_done(b));
+    hex("resp", "sms_send_done", b, fx_sms_send_done(b));
     return 0;
 }
 
@@ -777,6 +948,230 @@ static void test_nd(void) {
     CHECK(l2_to_host(frame, sizeof frame, f + 14, 30, HOST, GW) == 0);
 }
 
+static void test_sms_decode(void) {
+    sms_pdu_t s;
+    uint8_t b[256];
+    int n;
+    CHECK(sms_decode(MM_PDU1, sizeof MM_PDU1, &s) == 0);
+    CHECK(!s.submit && strcmp(s.addr, "+16175927198") == 0 && s.time == 1298911850 && s.tz_min == -300);
+    CHECK(s.dcs == SMS_DCS_GSM7 && s.total == 0 && !s.port && s.pid == 0);
+    CHECK(strcmp(s.text, "Here's a longer message [{with some extended characters}] thrown in, such as £ and ΩΠΨ and §¿ "
+                         "as well.") == 0);
+
+    CHECK(sms_decode(MM_PDU2, sizeof MM_PDU2, &s) == 0);
+    CHECK(strcmp(s.addr, "InternetSMS") == 0 && s.dcs == SMS_DCS_UCS2 && strcmp(s.text, "тест") == 0);
+    CHECK(s.time == 1301412004 && s.tz_min == 240);
+
+    CHECK(sms_decode(MM_PDU3, sizeof MM_PDU3, &s) == 0);
+    CHECK(strcmp(s.addr, "+18005551212") == 0 && strcmp(s.text, "hellohello") == 0 && s.time == 1293885296 && s.tz_min == 0);
+    memcpy(b, MM_PDU3, sizeof MM_PDU3);
+    b[10] = 0x81;  // 國內號碼：沒有 +
+    CHECK(sms_decode(b, sizeof MM_PDU3, &s) == 0 && strcmp(s.addr, "18005551212") == 0);
+    b[10] = 0x91;
+    b[18] = 0x04;  // 8-bit 資料（ModemManager 的 pdu3-8bit：10 octets，多一個 0xde）：沒有文字
+    b[sizeof MM_PDU3] = 0xde;
+    CHECK(sms_decode(b, sizeof MM_PDU3 + 1, &s) == 0 && s.dcs == SMS_DCS_8BIT && s.text[0] == 0);
+    CHECK(sms_decode(b, sizeof MM_PDU3, &s) < 0);
+    b[18] = 0xF4;
+    CHECK(sms_decode(b, sizeof MM_PDU3 + 1, &s) == 0 && s.dcs == SMS_DCS_8BIT);
+    b[18] = 0x00;
+    b[17] = 0x40;  // silent SMS（type 0）
+    CHECK(sms_decode(b, sizeof MM_PDU3, &s) == 0 && s.pid == 0x40);
+
+    CHECK(sms_decode(MM_DCSF1, sizeof MM_DCSF1, &s) == 0);
+    CHECK(strcmp(s.addr, "1800") == 0 && s.time == 1308913695 && s.tz_min == 120);
+    CHECK(strcmp(s.text, "Info SFR - Confidentiel, à ne jamais transmettre -\r\nVoici votre nouveau mot de passe : sw2ced "
+                         "pour gérer votre compte SFR sur www.sfr.fr ou par téléphone au 963") == 0);
+
+    n = unhex(MM_UDHI, b);
+    CHECK(sms_decode(b, n, &s) == 0 && strcmp(s.addr, "1002") == 0 && s.time == 1309383139);
+    CHECK(s.ref == 0x0010 && s.total == 2 && s.seq == 1);
+    CHECK(strcmp(s.text, "Welkom, bel om uw Voicemail te beluisteren naar +31612001233 (PrePay: *100*1233#). Voicemail "
+                         "ontvangen is altijd gratis. Voor gebruik van mobiel interne") == 0);
+
+    n = unhex(MM_MULTI1, b);
+    CHECK(sms_decode(b, n, &s) == 0 && strcmp(s.addr, "+16175046925") == 0 && s.time == 1335398210 && s.tz_min == -240);
+    CHECK(s.ref == 0x4C && s.total == 2 && s.seq == 1 && strcmp(s.text, MM_MULTI_TEXT1) == 0);
+    b[32] = 0;  // seq 0 不合理：當單則
+    CHECK(sms_decode(b, n, &s) == 0 && s.total == 0 && strcmp(s.text, MM_MULTI_TEXT1) == 0);
+    b[27] = 200;  // UDHL 超出 user data
+    CHECK(sms_decode(b, n, &s) < 0);
+    n = unhex(MM_MULTI2, b);
+    CHECK(sms_decode(b, n, &s) == 0 && s.ref == 0x4C && s.total == 2 && s.seq == 2 && s.time == 1335398211);
+    CHECK(strcmp(s.text, MM_MULTI_TEXT2) == 0);
+
+    n = unhex(MM_STORED_SUBMIT, b);
+    CHECK(sms_decode(b, n, &s) == 0 && s.submit && strcmp(s.addr, "639337937") == 0 && s.time == 0);
+    CHECK(strcmp(s.text, "你好你好你好你好你好你好你好你好你") == 0);
+    n = unhex(MM_STATUS_REPORT, b);
+    CHECK(sms_decode(b, n, &s) < 0);  // 狀態回報不處理
+
+    CHECK(sms_decode(TW_PDU, sizeof TW_PDU, &s) == 0);
+    CHECK(strcmp(s.addr, "0912345678") == 0 && s.time == 1791606896 && s.tz_min == 480 && s.dcs == SMS_DCS_UCS2);
+    CHECK(strcmp(s.text, "測試😀") == 0);
+    CHECK(sms_decode(TW_PDU, sizeof TW_PDU - 1, &s) < 0);  // user data 不夠長
+
+    // ModemManager 的壞 PDU
+    static const uint8_t bad1[] = {0x07, 0x91, 0x21, 0x43, 0x65, 0x87, 0x09, 0xf1, 0x04, 0x0b, 0x91, 0x81,
+                                   0x00, 0x55, 0x15, 0x12, 0xf2, 0x00, 0x00, 0x11, 0x10, 0x10, 0x21, 0x43,
+                                   0x65, 0x00, 0x0b, 0xe8, 0x32, 0x9b, 0xfd, 0x46, 0x97, 0xd9, 0xec, 0x37};
+    static const uint8_t bad2[] = {0x00, 0x0A, 0xBF, 0x00};
+    static const uint8_t bad3[] = {0x00, 0x1C, 0x01, 0x1C};
+    static const uint8_t bad4[] = {0x00, 0x41, 0x00, 0x01, 0x01, 0x00, 0x01, 0x4B, 0x00, 0x00, 0x2E};
+    static const uint8_t bad5[] = {0x00, 0xF1, 0x01, 0x01, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00};
+    CHECK(sms_decode(bad1, sizeof bad1, &s) < 0);
+    CHECK(sms_decode(bad2, sizeof bad2, &s) < 0);
+    CHECK(sms_decode(bad3, sizeof bad3, &s) < 0);
+    CHECK(sms_decode(bad4, sizeof bad4, &s) < 0);
+    CHECK(sms_decode(bad5, sizeof bad5, &s) < 0);
+    CHECK(sms_decode(TW_PDU, 0, &s) < 0);
+    b[0] = 0x0C;  // SMSC 長度超出
+    CHECK(sms_decode(b, 5, &s) < 0);
+}
+
+static char *repeat(char *out, const char *unit, int times) {
+    out[0] = 0;
+    for (int i = 0; i < times; i++) strcat(out, unit);
+    return out;
+}
+
+static void test_sms_encode(void) {
+    uint8_t pdu[SMS_MAX_PARTS][SMS_PDU_MAX], b[256];
+    int len[SMS_MAX_PARTS];
+    static char t[4096], t2[4096];
+    sms_pdu_t s;
+
+    // ModemManager 的 PDU creator 期待值
+    CHECK(sms_encode_submit("+15556661234", "This is really cool ΔΔΔΔΔ", 0, -1, pdu, len, 1) == 1);
+    CHECK(len[0] == (int)sizeof MM_SUBMIT_GSM_NO_VP && memcmp(pdu[0], MM_SUBMIT_GSM_NO_VP, (size_t)len[0]) == 0);
+    CHECK(sms_encode_submit("+15556661234", "This is really cool ΔΔΔΔΔ", 0, 0, pdu, len, 1) == 1);
+    CHECK(len[0] == (int)sizeof MM_SUBMIT_GSM3 && memcmp(pdu[0], MM_SUBMIT_GSM3, (size_t)len[0]) == 0);
+    CHECK(sms_encode_submit("+15555551234", "Hi there...Tue 17th Jan 2012 05:30.18 pm (GMT+1) ΔΔΔΔΔ", 0, 0, pdu, len, 1) == 1);
+    CHECK(len[0] == (int)sizeof MM_SUBMIT_GSM && memcmp(pdu[0], MM_SUBMIT_GSM, (size_t)len[0]) == 0);
+    CHECK(sms_encode_submit("+15555551234", "Да здравствует король, детка!", 0, 0, pdu, len, 1) == 1);
+    CHECK(len[0] == (int)sizeof MM_SUBMIT_UCS2 && memcmp(pdu[0], MM_SUBMIT_UCS2, (size_t)len[0]) == 0);
+
+    // 分段：兩段文字接起來用同一個 reference 編，user data（UDH + 補位 + 7-bit）要跟真實收到的那兩段一樣。
+    // 唯一的差別是 UDH 後面補到 septet 邊界的那個位元：收方不看，那支手機填 1，我們填 0。
+    snprintf(t, sizeof t, "%s%s", MM_MULTI_TEXT1, MM_MULTI_TEXT2);
+    CHECK(sms_encode_submit("+16175046925", t, 0x4C, -1, pdu, len, SMS_MAX_PARTS) == 2);
+    int n = unhex(MM_MULTI1, b);
+    CHECK(pdu[0][1] == 0x41 && pdu[0][13] == 160 && len[0] == 14 + 140 && n == 27 + 140);
+    CHECK(memcmp(pdu[0] + 14, b + 27, 6) == 0 && (pdu[0][20] | 1) == b[33] && memcmp(pdu[0] + 21, b + 34, 133) == 0);
+    n = unhex(MM_MULTI2, b);
+    CHECK(pdu[1][13] == 50 && len[1] == 14 + 44 && n == 27 + 44);
+    CHECK(memcmp(pdu[1] + 14, b + 27, 6) == 0 && (pdu[1][20] | 1) == b[33] && memcmp(pdu[1] + 21, b + 34, 37) == 0);
+
+    // 國內號碼
+    CHECK(sms_encode_submit("0912345678", "hi", 0, -1, pdu, len, 1) == 1);
+    CHECK(memcmp(pdu[0] + 3, (const uint8_t[]){0x0A, 0x81, 0x90, 0x21, 0x43, 0x65, 0x87}, 7) == 0);
+
+    // 中文分段：100 字 → 67 + 33，解回來接起來一樣
+    repeat(t, "中", 100);
+    CHECK(sms_encode_submit("+886912345678", t, 7, -1, pdu, len, SMS_MAX_PARTS) == 2);
+    CHECK(sms_decode(pdu[0], len[0], &s) == 0 && s.submit && s.dcs == SMS_DCS_UCS2 && s.ref == 7 && s.total == 2 &&
+          s.seq == 1);
+    CHECK(strcmp(s.addr, "+886912345678") == 0 && strcmp(s.text, repeat(t2, "中", 67)) == 0 && pdu[0][13] == 140);
+    CHECK(sms_decode(pdu[1], len[1], &s) == 0 && s.seq == 2 && strcmp(s.text, repeat(t2, "中", 33)) == 0);
+
+    // emoji 剛好跨在分段點：surrogate pair 不拆開，整個移到下一段
+    repeat(t, "中", 66);
+    strcat(t, "😀");
+    strcat(t, repeat(t2, "中", 10));
+    CHECK(sms_encode_submit("+886912345678", t, 8, -1, pdu, len, SMS_MAX_PARTS) == 2);
+    CHECK(sms_decode(pdu[0], len[0], &s) == 0 && strcmp(s.text, repeat(t2, "中", 66)) == 0);
+    CHECK(sms_decode(pdu[1], len[1], &s) == 0 && strncmp(s.text, "😀", 4) == 0);
+
+    // GSM 擴充字元（兩個 septet）剛好跨在分段點：escape 跟後面那個字一起移到下一段
+    repeat(t, "a", 152);
+    strcat(t, "€");
+    strcat(t, repeat(t2, "b", 20));
+    CHECK(sms_encode_submit("0912345678", t, 9, -1, pdu, len, SMS_MAX_PARTS) == 2);
+    CHECK(sms_decode(pdu[0], len[0], &s) == 0 && s.dcs == SMS_DCS_GSM7 && strcmp(s.text, repeat(t2, "a", 152)) == 0);
+    CHECK(sms_decode(pdu[1], len[1], &s) == 0 && strncmp(s.text, "€bbb", 6) == 0 && strlen(s.text) == 3 + 20);
+
+    bool ucs2;
+    CHECK(sms_count_parts("hello", &ucs2) == 1 && !ucs2);
+    CHECK(sms_count_parts(repeat(t, "a", 160), &ucs2) == 1 && !ucs2);
+    CHECK(sms_count_parts(repeat(t, "a", 161), &ucs2) == 2);
+    CHECK(sms_count_parts(repeat(t, "a", 306), &ucs2) == 2);
+    CHECK(sms_count_parts(repeat(t, "a", 307), &ucs2) == 3);
+    CHECK(sms_count_parts(repeat(t, "€", 80), &ucs2) == 1 && !ucs2);
+    CHECK(sms_count_parts(repeat(t, "€", 81), &ucs2) == 2);
+    CHECK(sms_count_parts(repeat(t, "中", 70), &ucs2) == 1 && ucs2);
+    CHECK(sms_count_parts(repeat(t, "中", 71), &ucs2) == 2 && ucs2);
+    CHECK(sms_count_parts("`", &ucs2) == 1 && ucs2);  // 反引號不在 GSM 字母表
+    CHECK(sms_count_parts("", &ucs2) < 0);
+    CHECK(sms_count_parts("\xff", &ucs2) < 0);
+    CHECK(sms_count_parts("\xed\xa0\x80", &ucs2) < 0);  // UTF-8 編出來的 surrogate
+
+    CHECK(sms_encode_submit("+886912345678", repeat(t, "中", 670), 1, -1, pdu, len, SMS_MAX_PARTS) == 10);
+    CHECK(sms_encode_submit("+886912345678", repeat(t, "中", 671), 1, -1, pdu, len, SMS_MAX_PARTS) < 0);
+    CHECK(sms_encode_submit("+886912345678", repeat(t, "中", 71), 1, -1, pdu, len, 1) < 0);
+    CHECK(sms_encode_submit("12", "hi", 0, -1, pdu, len, 1) < 0);
+    CHECK(sms_encode_submit("09-1234-5678", "hi", 0, -1, pdu, len, 1) < 0);
+    CHECK(sms_encode_submit("+", "hi", 0, -1, pdu, len, 1) < 0);
+    CHECK(sms_encode_submit("0912345678", "", 0, -1, pdu, len, 1) < 0);
+    CHECK(sms_valid_number("0912345678") && sms_valid_number("+886912345678") && sms_valid_number("1922"));
+    CHECK(!sms_valid_number("") && !sms_valid_number("+12") && !sms_valid_number("123456789012345678901"));
+}
+
+static void test_sms_mbim(void) {
+    uint8_t p[256], b[512];
+    mbim_msg_t m;
+    CHECK(mbim_info_sms_read(p, MBIM_SMS_FLAG_INDEX, 3) == 12 && get_le32(p) == 0 && get_le32(p + 4) == 1 &&
+          get_le32(p + 8) == 3);
+    CHECK(mbim_info_sms_delete(p, MBIM_SMS_FLAG_INDEX, 3) == 8 && get_le32(p) == 1 && get_le32(p + 4) == 3);
+    memset(p, 0xEE, sizeof p);
+    CHECK(mbim_info_sms_send(p, sizeof p, TW_PDU, sizeof TW_PDU) == 12 + 28);
+    CHECK(get_le32(p) == 0 && get_le32(p + 4) == 8 && get_le32(p + 8) == sizeof TW_PDU);
+    CHECK(memcmp(p + 12, TW_PDU, sizeof TW_PDU) == 0 && p[39] == 0);
+    CHECK(mbim_info_sms_send(p, 39, TW_PDU, sizeof TW_PDU) < 0);
+
+    mbim_sms_config_t c;
+    int n = fx_sms_config_done(b);
+    CHECK(mbim_parse(b, n, &m) == 0 && m.type == MBIM_COMMAND_DONE && m.cid == MBIM_CID_SMS_CONFIGURATION);
+    CHECK(memcmp(m.uuid, MBIM_UUID_SMS, 16) == 0 && m.info_len == 52);
+    CHECK(mbim_parse_sms_config(m.info, m.info_len, &c) == 0 && c.storage_state == 1 && c.format == 0);
+    CHECK(c.max_messages == 40 && strcmp(c.smsc, "+886935874443") == 0);
+
+    uint32_t flag = 0, idx = 0;
+    n = fx_sms_store_indication(b);
+    CHECK(mbim_parse(b, n, &m) == 0 && m.type == MBIM_INDICATE_STATUS && m.cid == MBIM_CID_SMS_MESSAGE_STORE_STATUS);
+    CHECK(mbim_parse_sms_store_status(m.info, m.info_len, &flag, &idx) == 0 && flag == MBIM_SMS_STORE_NEW_MESSAGE &&
+          idx == 3);
+
+    mbim_sms_record_t r[4];
+    sms_pdu_t s;
+    n = fx_sms_read_done(b);
+    CHECK(mbim_parse(b, n, &m) == 0 && m.cid == MBIM_CID_SMS_READ);
+    CHECK(mbim_parse_sms_read(m.info, m.info_len, r, 4) == 2);
+    CHECK(r[0].index == 3 && r[0].status == MBIM_SMS_STATUS_NEW && r[0].len == sizeof MM_PDU3);
+    CHECK(sms_decode(r[0].pdu, (int)r[0].len, &s) == 0 && strcmp(s.text, "hellohello") == 0);
+    CHECK(r[1].index == 4 && r[1].status == MBIM_SMS_STATUS_OLD && r[1].len == sizeof TW_PDU);
+    CHECK(sms_decode(r[1].pdu, (int)r[1].len, &s) == 0 && strcmp(s.text, "測試😀") == 0);
+    CHECK(mbim_parse_sms_read(m.info, m.info_len, r, 1) == 1);
+    uint8_t info[160];
+    memcpy(info, m.info, m.info_len);
+    put_le32(info + 16, 150);  // 第二筆的 offset 指到外面：跳過，第一筆照收
+    CHECK(mbim_parse_sms_read(info, m.info_len, r, 4) == 1 && r[0].index == 3);
+    memcpy(info, m.info, m.info_len);
+    put_le32(info + 24 + 12, 200);  // 第一筆的 PDU 超出紀錄
+    CHECK(mbim_parse_sms_read(info, m.info_len, r, 4) == 1 && r[0].index == 4);
+    memcpy(info, m.info, m.info_len);
+    put_le32(info + 4, 1000000);  // 筆數灌爆
+    CHECK(mbim_parse_sms_read(info, m.info_len, r, 4) < 0);
+    put_le32(info, 1);  // CDMA 格式不收
+    put_le32(info + 4, 2);
+    CHECK(mbim_parse_sms_read(info, m.info_len, r, 4) < 0);
+    CHECK(mbim_parse_sms_read(info, 7, r, 4) < 0);
+
+    uint32_t ref = 0;
+    n = fx_sms_send_done(b);
+    CHECK(mbim_parse(b, n, &m) == 0 && m.cid == MBIM_CID_SMS_SEND && mbim_parse_sms_send(m.info, m.info_len, &ref) == 0 &&
+          ref == 7);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--dump") == 0) return dump();
     test_requests_match_device();
@@ -793,6 +1188,9 @@ int main(int argc, char **argv) {
     test_signal_and_names();
     test_ip6_config();
     test_nd();
+    test_sms_decode();
+    test_sms_encode();
+    test_sms_mbim();
     printf("mbim: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

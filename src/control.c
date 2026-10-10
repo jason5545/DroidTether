@@ -8,6 +8,10 @@
 //   set ipv6 0|1               MBIM 數據機要不要 IPv6
 //   sim pin NNNN               存下 SIM PIN 並重新連線（只會試一次，被拒就刪掉）
 //   sim forget-pin             刪掉存著的 SIM PIN
+//   sms list                   收件匣與寄件（時間由舊到新）
+//   sms send NUMBER TEXT       排進寄件佇列（TEXT 用 \n、\t、\\ 跳脫），連著數據機就馬上送
+//   sms delete ID[,ID...]      從收件匣刪掉（數據機裡的早就刪了）
+//   sms read ID[,ID...]|all    標成已讀
 //   reconnect                  斷開重連
 //   quit                       結束行程（launchd 會重新啟動，用在 App 更新後換新版 daemon）
 
@@ -28,6 +32,8 @@
 
 #include "dnsprobe.h"
 #include "netcfg.h"
+#include "sms.h"
+#include "sms_store.h"
 #include "state.h"
 
 static const char *g_config_path;
@@ -37,13 +43,25 @@ typedef struct {
     size_t len, cap;
 } sbuf;
 
+// 不夠放就長大（簡訊清單可能很長）
 static void sb_add(sbuf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void sb_add(sbuf *b, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(b->p + b->len, b->cap - b->len, fmt, ap);
     va_end(ap);
-    if (n > 0) b->len = b->len + (size_t)n < b->cap ? b->len + (size_t)n : b->cap - 1;
+    if (n < 0) return;
+    if (b->len + (size_t)n >= b->cap) {
+        size_t nc = (b->len + (size_t)n + 1) * 2;
+        char *q = realloc(b->p, nc);
+        if (!q) return;
+        b->p = q;
+        b->cap = nc;
+        va_start(ap, fmt);
+        vsnprintf(b->p + b->len, b->cap - b->len, fmt, ap);
+        va_end(ap);
+    }
+    b->len += (size_t)n;
 }
 
 static void sb_str(sbuf *b, const char *s) {
@@ -105,6 +123,9 @@ static void status_json(sbuf *b) {
         if (g_st.pin_attempts >= 0) sb_add(b, ",\"pin_attempts\":%d", g_st.pin_attempts);
     }
     sb_add(b, ",\"sim_pin_saved\":%s", sim_pin_saved() ? "true" : "false");
+    sb_add(b, ",\"sms_ready\":%s,\"sms_full\":%s,\"sms_unsupported\":%s,\"sms_unread\":%d,\"sms_rev\":%u",
+           g_st.sms_ready ? "true" : "false", g_st.sms_full ? "true" : "false", g_st.sms_unsupported ? "true" : "false",
+           sms_store_unread(), sms_store_rev());
     sb_add(b, ",\"rx_bytes\":%lu,\"tx_bytes\":%lu", (unsigned long)g_rx_bytes, (unsigned long)g_tx_bytes);
     sb_add(b, ",\"config\":{\"enabled\":%s,\"primary\":%s,\"wifi_off\":%s,\"dns_mode\":\"%s\",\"dns_servers\":",
            g_cfg.enabled ? "true" : "false", g_cfg.primary ? "true" : "false", g_cfg.wifi_off ? "true" : "false",
@@ -114,6 +135,96 @@ static void status_json(sbuf *b) {
     sb_str(b, g_cfg.apn);
     sb_add(b, ",\"ipv6\":%s}}", g_cfg.ipv6 ? "true" : "false");
     pthread_mutex_unlock(&g_state_lock);
+}
+
+static const char *SMS_STATES[] = {"received", "queued", "sending", "sent", "failed"};
+
+static void sms_list_json(sbuf *b) {
+    sms_msg_t *m = NULL;
+    int n = sms_store_snapshot(&m);
+    if (n < 0) {
+        sb_add(b, "{\"ok\":false,\"error\":\"no_memory\"}");
+        return;
+    }
+    sb_add(b, "{\"ok\":true,\"rev\":%u,\"messages\":[", sms_store_rev());
+    for (int i = 0; i < n; i++) {
+        sb_add(b, "%s{\"id\":%u,\"dir\":\"%s\",\"state\":\"%s\",\"time\":%ld,\"read\":%s,\"parts\":%d,\"number\":",
+               i ? "," : "", m[i].id, m[i].out ? "out" : "in", SMS_STATES[m[i].state], (long)m[i].time,
+               m[i].read ? "true" : "false", m[i].parts);
+        sb_str(b, m[i].number);
+        if (m[i].error[0]) {
+            sb_add(b, ",\"error\":");
+            sb_str(b, m[i].error);
+        }
+        sb_add(b, ",\"text\":");
+        sb_str(b, m[i].text);
+        sb_add(b, "}");
+    }
+    sb_add(b, "]}");
+    sms_store_free(m, n);
+}
+
+// 號碼和內容不寫進 log。
+static void handle_sms(const char *key, char *val, sbuf *out) {
+    if (strcmp(key, "list") == 0) {
+        sms_list_json(out);
+        return;
+    }
+    if (strcmp(key, "send") == 0 && val) {
+        char *text = strchr(val, ' ');
+        if (!text) {
+            sb_add(out, "{\"ok\":false,\"error\":\"invalid_value\"}");
+            return;
+        }
+        *text++ = '\0';
+        size_t cap = strlen(text) + 1;
+        char *plain = malloc(cap);
+        bool ucs2;
+        int parts = plain && sms_unescape(text, plain, cap) >= 0 ? sms_count_parts(plain, &ucs2) : -1;
+        pthread_mutex_lock(&g_state_lock);
+        bool modem = g_st.modem;
+        pthread_mutex_unlock(&g_state_lock);
+        const char *err = !sms_valid_number(val) ? "invalid_number"
+                          : parts < 0            ? "invalid_text"
+                          : parts > SMS_MAX_PARTS ? "too_long"
+                          : !modem               ? "no_modem"
+                                                 : NULL;
+        uint32_t id = err ? 0 : sms_store_queue(val, plain, parts);
+        if (!err && !id) err = "save_failed";
+        free(plain);
+        if (err) {
+            sb_add(out, "{\"ok\":false,\"error\":\"%s\"}", err);
+        } else {
+            LOGI("control: SMS queued (%d part%s)", parts, parts == 1 ? "" : "s");
+            sb_add(out, "{\"ok\":true,\"id\":%u,\"parts\":%d}", id, parts);
+        }
+        return;
+    }
+    if (strcmp(key, "delete") == 0 && val) {
+        int n = 0, bad = 0;
+        char *save = NULL;
+        for (char *t = strtok_r(val, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+            if (sms_store_delete((uint32_t)strtoul(t, NULL, 10)) == 0) n++;
+            else bad++;
+        }
+        if (n) LOGI("control: deleted %d SMS", n);
+        sb_add(out, "{\"ok\":%s,\"deleted\":%d}", bad ? "false" : "true", n);
+        return;
+    }
+    if (strcmp(key, "read") == 0 && val) {
+        if (strcmp(val, "all") == 0) {
+            sms_store_mark_read(0);
+        } else {
+            char *save = NULL;
+            for (char *t = strtok_r(val, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+                uint32_t id = (uint32_t)strtoul(t, NULL, 10);
+                if (id) sms_store_mark_read(id);
+            }
+        }
+        sb_add(out, "{\"ok\":true}");
+        return;
+    }
+    sb_add(out, "{\"ok\":false,\"error\":\"invalid_value\"}");
 }
 
 static void apply_change(void) {
@@ -151,6 +262,10 @@ static void handle(char *line, sbuf *out) {
         } else {
             sb_add(out, "{\"ok\":false,\"error\":\"invalid_value\"}");
         }
+        return;
+    }
+    if (strcmp(cmd, "sms") == 0 && key) {
+        handle_sms(key, val, out);
         return;
     }
     if (strcmp(cmd, "quit") == 0) {
@@ -221,9 +336,12 @@ static void handle(char *line, sbuf *out) {
     sb_add(out, "{\"ok\":false,\"error\":\"unknown_command\"}");
 }
 
+// 一行最長 16 KB：簡訊內容（10 段中文約 2 KB，跳脫後更長）
+#define LINE_MAX_BYTES 16384
+
 static void serve_client(int fd) {
     struct pollfd p = {.fd = fd, .events = POLLIN};
-    char line[512];
+    static char line[LINE_MAX_BYTES];
     size_t n = 0;
     while (n < sizeof line - 1) {
         if (poll(&p, 1, 2000) <= 0) break;
@@ -234,18 +352,26 @@ static void serve_client(int fd) {
     }
     line[n] = '\0';
 
-    char buf[2048];
-    sbuf out = {buf, 0, sizeof buf};
-    buf[0] = '\0';
+    sbuf out = {malloc(4096), 0, 4096};
+    if (!out.p) return;
+    out.p[0] = '\0';
     handle(line, &out);
     sb_add(&out, "\n");
-    (void)!write(fd, buf, out.len);
+    for (size_t w = 0; w < out.len;) {
+        ssize_t r = write(fd, out.p + w, out.len - w);
+        if (r <= 0) break;
+        w += (size_t)r;
+    }
+    free(out.p);
 }
 
 static void *control_thread(void *arg) {
     int srv = (int)(intptr_t)arg;
     struct pollfd p = {.fd = srv, .events = POLLIN};
+    int ticks = 0;
     while (!g_stop) {
+        // 排隊 5 分鐘還沒送出（沒有數據機）的簡訊改成失敗，免得之後突然送出去
+        if (++ticks % 20 == 0) sms_store_fail_stale(300);
         if (poll(&p, 1, 500) <= 0) continue;
         int fd = accept(srv, NULL, NULL);
         if (fd < 0) continue;

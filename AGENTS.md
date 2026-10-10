@@ -21,9 +21,16 @@ SMAppService 登記背景服務時，會把當時的簽章身分記成啟動限�
 
 ## 測試
 
-- `make test`：封包單元測試，不需要手機。包含 `build/test_mbim`：MBIM 訊息用 TCL IK512 實際收發的位元組對照。
+- `make test`：封包單元測試，不需要手機。包含 `build/test_mbim`：MBIM 訊息用 TCL IK512 實際收發的位元組對照，簡訊 PDU 用 ModemManager 測試裡的真實簡訊與期待值對照；`build/test_sms_store`：收件匣檔案。
 - `tests/mbim_probe.c`：在 Linux 主機上用真的 MBIM 數據機跑 `src/mbim.c`（開 session、撥號、自己組 ping 與 DNS 經數據機收發），不建介面、不改路由。PVE 沒有編譯器，在 LXC 112（gki-build）裡用 Mac 帶過去的 `libusb.h` 編，直接連結 `/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0`。跑之前停掉 `failover-watchdog.timer` 與 `ModemManager`，跑完 `systemctl start ModemManager`、`systemctl restart ik512-always-on`、`systemctl start failover-watchdog.timer`；包成 `systemd-run` 執行，SSH 斷了也會還原。2026/10/10 實測全過，5G 備援停了約 80 秒，主線路沒受影響。
 - `build/test_mbim --dump` 加 `tests/mbim_oracle.py`：在裝了 libmbim 的 Linux 主機（PVE）上，跟 libmbim 逐位元組對照撥號、附著等送不出去的指令。不需要數據機。
 - `python3 tests/dns_logic_test.py`：DNS 與路由的實機邏輯測試，需要手機連線。
 - `python3 tests/vpn_logic_test.py`：Tailscale exit node 疊在 tether 上時，VPN 必須拿到預設路由。
 - `swiftc -O -parse-as-library app/Sources/WifiGuard.swift tests/wifi_guard_test.swift -o build/wifi_guard_test && build/wifi_guard_test`：daemon 連不上時，App 把 daemon 關掉的 Wi-Fi 開回來的條件。
+
+## 簡訊
+
+- 收到的簡訊存在 `/Library/Application Support/DroidTether/config.sms`（只有 root 能讀寫），存好才從數據機刪（Jason 2026/10/10 決定）。內容和號碼不准寫進 log。
+- 每一則實際送出的測試簡訊都要先問 Jason，寫明收件號碼和內容。
+- TCL IK512 不能收發簡訊：MBIM SEND 一秒就回 failure，傳給它的也收不到。2026/10/10 透過 QMI over MBIM（服務 `d1a30bc2-f97a-6e43-bf65-c7e24fb0f0d3`，CID 1，要先用 DEVICE_SERVICE_SUBSCRIBE_LIST 訂閱才收得到 QMI indication）查：NAS 在 LTE 上 CS、PS 都附著了；WMS Raw Send 回 DeviceUnsupported、傳輸註冊回 DeviceNotReady；IMSA 回 InvalidOperation；PDC 選用的是 `TaiwanMobile_Commercial`。可能要改 NV／EFS 打開 IMS，沒試，Jason 決定先不碰。daemon 把送簡訊被拒的數據機記在 `config.sms-unsupported`，App 就不顯示簡訊入口。
+- 在 Mac 上直接用數據機跑 probe：`echo "set enabled 0" | nc -U /var/run/droidtetherd.sock` 暫停 daemon，以一般使用者身分跑（macOS 存取 USB 不需要 root），跑完 `set enabled 1`。暫停期間 Mac 改走 Wi-Fi，恢復後約 5 秒重新連上。

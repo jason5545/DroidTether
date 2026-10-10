@@ -29,6 +29,7 @@
 #include "netcfg.h"
 #include "rndis.h"
 #include "session.h"
+#include "sms_store.h"
 #include "state.h"
 #include "usb.h"
 #include "wifi.h"
@@ -770,6 +771,7 @@ int main(int argc, char **argv) {
     pthread_mutex_unlock(&g_state_lock);
 
     snprintf(g_pin_path, sizeof g_pin_path, "%s.sim-pin", config_path);
+    sms_store_init(config_path);
     netcfg_remove_stale();
     feth_destroy_stale();
     wifi_init(config_path);

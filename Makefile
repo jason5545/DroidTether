@@ -1,5 +1,5 @@
 BREW     ?= $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
-VERSION  ?= 0.4.5
+VERSION  ?= 0.5.1
 BUILD    ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 1)
 SIGN_ID  ?= Apple Development
 CC       := clang
@@ -36,11 +36,15 @@ build:
 build/test_packets: tests/test_packets.c src/dhcp.c src/rndis.c src/dnsprobe.c src/*.h | build
 	$(CC) $(CFLAGS) tests/test_packets.c src/dhcp.c src/rndis.c src/dnsprobe.c $(LDLIBS) -o $@
 
-build/test_mbim: tests/test_mbim.c src/mbim.c src/dhcp.c src/*.h | build
-	$(CC) $(CFLAGS) tests/test_mbim.c src/mbim.c src/dhcp.c $(LDLIBS) -o $@
+build/test_mbim: tests/test_mbim.c src/mbim.c src/sms.c src/dhcp.c src/*.h | build
+	$(CC) $(CFLAGS) tests/test_mbim.c src/mbim.c src/sms.c src/dhcp.c $(LDLIBS) -o $@
 
-test: build/test_packets build/test_mbim
+build/test_sms_store: tests/test_sms_store.c src/sms_store.c src/*.h | build
+	$(CC) $(CFLAGS) tests/test_sms_store.c src/sms_store.c -o $@
+
+test: build/test_packets build/test_mbim build/test_sms_store
 	build/test_mbim
+	build/test_sms_store
 	build/test_packets build/test_packets.pcap
 	@if command -v tcpdump >/dev/null; then tcpdump -nn -vvv -r build/test_packets.pcap 2>/dev/null | grep -c "udp sum ok" | xargs -I{} sh -c 'test {} -eq 3 && echo "tcpdump: 3/3 udp checksums ok" || { echo "tcpdump: checksum mismatch"; exit 1; }'; fi
 

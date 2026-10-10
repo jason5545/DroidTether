@@ -37,8 +37,44 @@ struct DaemonStatus: Decodable, Equatable {
     var tech: String?
     var pinAttempts: Int?
     var simPinSaved: Bool?
+    // 簡訊（0.5 起）
+    var smsReady: Bool?
+    var smsFull: Bool?
+    var smsUnsupported: Bool?  // 這支數據機送簡訊被拒過（例如 TCL IK512），不顯示簡訊入口
+    var smsUnread: Int?
+    var smsRev: Int?
 
     var isModem: Bool { kind == "modem" }
+}
+
+/// 一則簡訊，欄位對應 src/control.c 的 sms_list_json()。
+struct SMSMessage: Decodable, Identifiable, Equatable {
+    var id: Int
+    var dir: String    // "in" 收到、"out" 寄出
+    var state: String  // received、queued、sending、sent、failed
+    var time: Double
+    var read: Bool
+    var parts: Int
+    var number: String
+    var error: String?
+    var text: String
+
+    var isOutgoing: Bool { dir == "out" }
+    var date: Date { Date(timeIntervalSince1970: time) }
+}
+
+struct SMSList: Decodable {
+    var ok: Bool
+    var rev: Int?
+    var messages: [SMSMessage]?
+}
+
+/// sms send / delete / read 的回覆。
+struct SMSReply: Decodable {
+    var ok: Bool
+    var error: String?
+    var id: Int?
+    var parts: Int?
 }
 
 enum DaemonError: Error {
@@ -59,10 +95,32 @@ enum DaemonClient {
         try decode(send(line))
     }
 
-    private static func decode(_ data: Data) throws -> DaemonStatus {
+    static func smsList() throws -> SMSList {
+        try decode(send("sms list"))
+    }
+
+    /// 號碼不能有空白；內容裡的換行、tab、反斜線跳脫成一行。
+    static func smsSend(to number: String, text: String) throws -> SMSReply {
+        let escaped = text.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\r\n", with: "\\n")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        return try decode(send("sms send \(number) \(escaped)"))
+    }
+
+    static func smsDelete(_ ids: [Int]) throws -> SMSReply {
+        try decode(send("sms delete " + ids.map(String.init).joined(separator: ",")))
+    }
+
+    static func smsMarkRead(_ ids: [Int]) throws -> SMSReply {
+        try decode(send("sms read " + ids.map(String.init).joined(separator: ",")))
+    }
+
+    private static func decode<T: Decodable>(_ data: Data) throws -> T {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        guard let s = try? decoder.decode(DaemonStatus.self, from: data) else { throw DaemonError.badReply }
+        guard let s = try? decoder.decode(T.self, from: data) else { throw DaemonError.badReply }
         return s
     }
 

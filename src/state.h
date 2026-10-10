@@ -50,6 +50,9 @@ typedef struct {
     char dns6[2][48];  // 數據機給的 IPv6 DNS（configd 會排在 IPv4 前面）
     int ndns6;
     int pin_attempts;  // SIM 要 PIN 時剩幾次，-1 表示不知道
+    bool sms_ready;    // 數據機的簡訊儲存區可以用（連線中才有）
+    bool sms_full;     // 數據機的簡訊儲存區滿了
+    bool sms_unsupported;  // 這支數據機送簡訊被拒過（見 sms_store.h），App 不顯示簡訊入口
 } dt_status;
 
 extern pthread_mutex_t g_state_lock;

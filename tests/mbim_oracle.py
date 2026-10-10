@@ -31,6 +31,8 @@ get_raw = fn("mbim_message_get_raw", C.POINTER(C.c_uint8), P, C.POINTER(U32), ER
 set_tid = fn("mbim_message_set_transaction_id", None, P, U32)
 msg_new = fn("mbim_message_new", P, C.c_char_p, U32)
 printable = fn("mbim_message_get_printable", C.c_char_p, P, C.c_char_p, C.c_int)
+# Print fields marked personal-info (the SMS PDUs) instead of '###'.
+fn("mbim_utils_set_show_personal_info", None, C.c_int)(1)
 uuid_ctx = fn("mbim_uuid_from_context_type", P, C.c_int)
 CTX_INTERNET = uuid_ctx(2)  # MBIM_CONTEXT_TYPE_INTERNET
 
@@ -69,6 +71,33 @@ builders["pin_enter_12345"] = pin_enter("12345")
 builders["signal_query"] = lambda t: fn("mbim_message_signal_state_query_new", P, ERR)(None)
 builders["device_caps_query"] = lambda t: fn("mbim_message_device_caps_query_new", P, ERR)(None)
 
+# SMS service. The PDU itself is opaque to libmbim; sms_send_* hand it our PDU and compare the framing
+# (format, offset, size, padding).
+builders["sms_config_query"] = lambda t: fn("mbim_message_sms_configuration_query_new", P, ERR)(None)
+builders["sms_store_status_query"] = lambda t: fn("mbim_message_sms_message_store_status_query_new", P, ERR)(None)
+sms_read = fn("mbim_message_sms_read_query_new", P, U32, U32, U32, ERR)  # format, flag, index
+builders["sms_read_all"] = lambda t: sms_read(0, 0, 0, None)  # MBIM_SMS_FORMAT_PDU, MBIM_SMS_FLAG_ALL
+builders["sms_read_index_3"] = lambda t: sms_read(0, 1, 3, None)  # MBIM_SMS_FLAG_INDEX
+builders["sms_read_new"] = lambda t: sms_read(0, 2, 0, None)  # MBIM_SMS_FLAG_NEW
+sms_delete = fn("mbim_message_sms_delete_set_new", P, U32, U32, ERR)  # flag, index
+builders["sms_delete_index_3"] = lambda t: sms_delete(1, 3, None)
+builders["sms_delete_all"] = lambda t: sms_delete(0, 0, None)
+
+
+class PduSendRecord(C.Structure):
+    _fields_ = [("pdu_data_size", U32), ("pdu_data", C.POINTER(C.c_uint8))]
+
+
+sms_send = fn("mbim_message_sms_send_set_new", P, U32, C.POINTER(PduSendRecord), P, ERR)
+
+
+def sms_send_from(ours):
+    size = int.from_bytes(ours[56:60], "little")
+    pdu = (C.c_uint8 * size).from_buffer_copy(ours[60:60 + size])
+    rec = PduSendRecord(size, pdu)
+    return sms_send(0, C.byref(rec), None, None)
+
+
 # Response fixtures: the fields libmbim must read from them.
 expect = {
     "real_ipcfg_done": ["IPv4ConfigurationAvailable = 'address, gateway, dns, mtu'", "OnLinkPrefixLength = '29'",
@@ -89,6 +118,15 @@ expect = {
                     "IPv6Gateway = '2402:7500:4f6:9a73:e965:6ce9:6ebc:bf6d'",
                     "IPv6DnsServer = '2001:4860:4860::8888, 2001:4860:4860::8844'", "IPv6Mtu = '1500'"],
     "device_caps_done": ["CustomDataClass = '5G/TDS'"],
+    "sms_config_done": ["SmsStorageState = 'initialized'", "Format = 'pdu'", "MaxMessages = '40'",
+                        "CdmaShortMessageSize = '0'", "ScAddress = '+886935874443'"],
+    "sms_store_indication": ["Flag = 'new-message'", "MessageIndex = '3'"],
+    "sms_read_done": ["Format = '0'", "MessagesCount = '2'", "MessageIndex = '3'", "MessageStatus = 'new'",
+                      "PduData = '07:91:21:43:65:87:09:f1:04:0b:91:81:00:55:15:12:f2:00:00:11:10:10:21:43:65:00:0a:"
+                      "e8:32:9b:fd:46:97:d9:ec:37'",
+                      "MessageIndex = '4'", "MessageStatus = 'old'",
+                      "PduData = '00:04:0a:81:90:21:43:65:87:00:08:62:01:01:21:43:65:23:08:6e:2c:8a:66:d8:3d:de:00'"],
+    "sms_send_done": ["MessageReference = '7'"],
 }
 
 
@@ -108,7 +146,7 @@ def main(path):
         ours = bytes.fromhex(hexdata)
         if kind == "req":
             tid = int.from_bytes(ours[8:12], "little")
-            m = builders[name](tid)
+            m = sms_send_from(ours) if name.startswith("sms_send") else builders[name](tid)
             set_tid(m, tid)
             theirs = raw(m)
             ok = theirs == ours

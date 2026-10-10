@@ -31,6 +31,7 @@ final class TetherModel: ObservableObject {
     @Published private(set) var history: [TrafficSample] = []
     @Published private(set) var phonePing: Double?
     @Published private(set) var internetPing: Double?
+    @Published private(set) var smsMessages: [SMSMessage] = []
 
     private let service = SMAppService.daemon(plistName: TetherModel.daemonPlist)
     private var timer: Timer?
@@ -42,6 +43,9 @@ final class TetherModel: ObservableObject {
     private var sampleID = 0
     private var pingInFlight = false
     private var tick = 0
+    private var smsRev: Int?
+    private var smsFetching = false
+    private var smsNotifiedUpTo: Int?  // App 打開時已經有的、通知過的收件最大 id
 
     let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
 
@@ -94,6 +98,7 @@ final class TetherModel: ObservableObject {
             if !history.isEmpty { history.removeAll() }
         }
         if status != s { status = s }
+        refreshSMSIfChanged(s)
         restartDaemonIfStale(s)
         guardWifi(daemonReachable: s != nil)
     }
@@ -208,5 +213,67 @@ final class TetherModel: ObservableObject {
 
     func openLog() {
         NSWorkspace.shared.open(URL(fileURLWithPath: TetherModel.logPath))
+    }
+
+    // MARK: - 簡訊
+
+    /// 接著能用簡訊的數據機，或之前收過、寄出成功過簡訊，就顯示簡訊入口。
+    /// 送簡訊被拒過的數據機（daemon 的 sms_unsupported，例如 TCL IK512）不顯示。
+    var smsAvailable: Bool {
+        if smsMessages.contains(where: { !$0.isOutgoing || $0.state == "sent" }) { return true }
+        guard let s = status else { return false }
+        return s.isModem && s.smsReady == true && s.smsUnsupported != true
+    }
+    var smsReady: Bool { status?.smsReady == true }
+    var smsUnread: Int { status?.smsUnread ?? 0 }
+
+    /// daemon 的 sms_rev 變了才重新要清單。
+    private func refreshSMSIfChanged(_ s: DaemonStatus?) {
+        if smsAvailable { Notifier.requestAuthorizationOnce() }
+        guard let rev = s?.smsRev, rev != smsRev, !smsFetching else { return }
+        smsFetching = true
+        Task.detached {
+            let list = try? DaemonClient.smsList()
+            await MainActor.run {
+                self.smsFetching = false
+                guard let list, list.ok, let messages = list.messages else { return }
+                self.smsRev = list.rev ?? rev
+                self.applySMS(messages)
+            }
+        }
+    }
+
+    private func applySMS(_ messages: [SMSMessage]) {
+        let newest = messages.filter { !$0.isOutgoing }.map(\.id).max() ?? 0
+        // 第一次只記下目前有的，App 開著時新進來的才通知
+        if let seen = smsNotifiedUpTo {
+            for m in messages where !m.isOutgoing && !m.read && m.id > seen { Notifier.newMessage(m) }
+        }
+        smsNotifiedUpTo = max(smsNotifiedUpTo ?? 0, newest)
+        if smsMessages != messages { smsMessages = messages }
+    }
+
+    /// 成功回傳 nil，失敗回傳 daemon 的錯誤代碼。
+    func sendSMS(to number: String, text: String) async -> String? {
+        let reply = await Task.detached { try? DaemonClient.smsSend(to: number, text: text) }.value
+        refresh()
+        guard let reply else { return "unreachable" }
+        return reply.ok ? nil : (reply.error ?? "failed")
+    }
+
+    func deleteSMS(_ ids: [Int]) {
+        guard !ids.isEmpty else { return }
+        Task.detached {
+            _ = try? DaemonClient.smsDelete(ids)
+            await MainActor.run { self.refresh() }
+        }
+    }
+
+    func markSMSRead(_ ids: [Int]) {
+        guard !ids.isEmpty else { return }
+        Task.detached {
+            _ = try? DaemonClient.smsMarkRead(ids)
+            await MainActor.run { self.refresh() }
+        }
     }
 }

@@ -11,6 +11,8 @@
 // UUID 在線上的位元組順序就是字面上的順序。
 const uint8_t MBIM_UUID_BASIC_CONNECT[16] = {0xa2, 0x89, 0xcc, 0x33, 0xbc, 0xbb, 0x8b, 0x4f,
                                              0xb6, 0xb0, 0x13, 0x3e, 0xc2, 0xaa, 0xe6, 0xdf};
+const uint8_t MBIM_UUID_SMS[16] = {0x53, 0x3f, 0xbe, 0xeb, 0x14, 0xfe, 0x44, 0x67,
+                                   0x9f, 0x90, 0x33, 0xa2, 0x23, 0xe5, 0x6c, 0x3f};
 const uint8_t MBIM_CONTEXT_INTERNET[16] = {0x7e, 0x5e, 0x2a, 0x7e, 0x4e, 0x6f, 0x72, 0x72,
                                            0x73, 0x6b, 0x65, 0x6e, 0x7e, 0x5e, 0x2a, 0x7e};
 
@@ -124,6 +126,32 @@ int mbim_info_pin_enter(uint8_t *p, int cap, const char *pin) {
     put_le32(p + 12, (uint32_t)(n * 2));
     for (size_t i = 0; i < n; i++) p[24 + 2 * i] = (uint8_t)pin[i];
     return len;
+}
+
+int mbim_info_sms_read(uint8_t *p, uint32_t flag, uint32_t index) {
+    put_le32(p, 0);  // MBIM_SMS_FORMAT_PDU
+    put_le32(p + 4, flag);
+    put_le32(p + 8, index);
+    return 12;
+}
+
+int mbim_info_sms_delete(uint8_t *p, uint32_t flag, uint32_t index) {
+    put_le32(p, flag);
+    put_le32(p + 4, index);
+    return 8;
+}
+
+// SmsFormat，接著是內嵌的 MBIM_SMS_SEND_PDU：PduDataOffset、PduDataSize，offset 從這個 struct 的開頭算（8），
+// 資料補到 4 的倍數。
+int mbim_info_sms_send(uint8_t *p, int cap, const uint8_t *pdu, int len) {
+    int total = 12 + ((len + 3) & ~3);
+    if (len <= 0 || total > cap) return -1;
+    memset(p, 0, (size_t)total);
+    put_le32(p, 0);  // MBIM_SMS_FORMAT_PDU
+    put_le32(p + 4, 8);
+    put_le32(p + 8, (uint32_t)len);
+    memcpy(p + 12, pdu, (size_t)len);
+    return total;
 }
 
 // ---------- 訊息解析 ----------
@@ -370,6 +398,51 @@ int mbim_parse_data_class(const uint8_t *p, uint32_t n, uint32_t *cls) {
     return 0;
 }
 
+// SmsStorageState, Format, MaxMessages, CdmaShortMessageSize, ScAddress(offset, size)
+int mbim_parse_sms_config(const uint8_t *p, uint32_t n, mbim_sms_config_t *c) {
+    memset(c, 0, sizeof *c);
+    if (n < 24) return -1;
+    c->storage_state = get_le32(p);
+    c->format = get_le32(p + 4);
+    c->max_messages = get_le32(p + 8);
+    return utf16_to_utf8(p, n, get_le32(p + 16), get_le32(p + 20), c->smsc, sizeof c->smsc) < 0 ? -1 : 0;
+}
+
+int mbim_parse_sms_store_status(const uint8_t *p, uint32_t n, uint32_t *flag, uint32_t *index) {
+    if (n < 8) return -1;
+    *flag = get_le32(p);
+    *index = get_le32(p + 4);
+    return 0;
+}
+
+// Format, ElementCount, 每筆一個 (offset, size)，指向 MBIM_SMS_PDU_RECORD：
+// MessageIndex, MessageStatus, PduDataOffset, PduDataSize, 資料。PduDataOffset 從這筆紀錄的開頭算。
+int mbim_parse_sms_read(const uint8_t *p, uint32_t n, mbim_sms_record_t *out, int max) {
+    if (n < 8 || get_le32(p) != 0) return -1;
+    uint32_t count = get_le32(p + 4);
+    if (count > (n - 8) / 8) return -1;
+    int got = 0;
+    for (uint32_t i = 0; i < count && got < max; i++) {
+        uint32_t off = get_le32(p + 8 + 8 * i), size = get_le32(p + 12 + 8 * i);
+        if (off < 8 || off > n || size > n - off || size < 16) continue;
+        const uint8_t *r = p + off;
+        uint32_t poff = get_le32(r + 8), psz = get_le32(r + 12);
+        if (poff < 16 || poff > size || psz > size - poff || !psz) continue;
+        out[got].index = get_le32(r);
+        out[got].status = get_le32(r + 4);
+        out[got].pdu = r + poff;
+        out[got].len = psz;
+        got++;
+    }
+    return got;
+}
+
+int mbim_parse_sms_send(const uint8_t *p, uint32_t n, uint32_t *msg_ref) {
+    if (n < 4) return -1;
+    *msg_ref = get_le32(p);
+    return 0;
+}
+
 // 0x40、0x80 是 Microsoft 擴充定義的 5G NSA、5G SA
 const char *mbim_data_class_name(uint32_t cls) {
     if (cls & 0x80) return "5G SA";
@@ -396,7 +469,12 @@ const char *mbim_status_name(uint32_t status) {
                                   "provider-not-visible", "data-class-not-available", "packet-service-detached",
                                   "max-activated-contexts", "not-initialized", "voice-call-in-progress",
                                   "context-not-activated", "service-not-activated", "invalid-access-string",
-                                  "invalid-user-name-pwd", "radio-power-off"};
+                                  "invalid-user-name-pwd", "radio-power-off", "invalid-parameters", "read-failure",
+                                  "write-failure", "other", "no-phonebook", "parameter-too-long", "stk-busy",
+                                  "operation-not-allowed", "memory-failure", "invalid-memory-index", "memory-full"};
+    static const char *sms[] = {"sms-unknown-smsc-address", "sms-network-timeout", "sms-lang-not-supported",
+                                "sms-encoding-not-supported", "sms-format-not-supported"};
+    if (status >= 100 && status < 100 + sizeof sms / sizeof sms[0]) return sms[status - 100];
     return status < sizeof names / sizeof names[0] ? names[status] : "other";
 }
 
@@ -813,18 +891,18 @@ void mbim_dev_close(mbim_dev_t *d) {
     transact(d, msg, 12, resp, sizeof resp, 2000);
 }
 
-int mbim_dev_command(mbim_dev_t *d, uint32_t cid, bool set, const uint8_t *info, int info_len, uint8_t *out, int cap,
-                     uint32_t *status, int timeout_ms) {
+int mbim_dev_command(mbim_dev_t *d, const uint8_t uuid[16], uint32_t cid, bool set, const uint8_t *info, int info_len,
+                     uint8_t *out, int cap, uint32_t *status, int timeout_ms) {
     uint8_t *msg = malloc(d->max_ctrl);
     uint8_t *resp = malloc(RESP_BUF);
     int ret = -1;
-    int len = mbim_build_command(msg, (int)d->max_ctrl, ++d->next_tid, MBIM_UUID_BASIC_CONNECT, cid, set, info, info_len);
+    int len = mbim_build_command(msg, (int)d->max_ctrl, ++d->next_tid, uuid, cid, set, info, info_len);
     int n = len > 0 ? transact(d, msg, len, resp, RESP_BUF, timeout_ms) : -1;
     mbim_msg_t m;
     if (n > 0 && mbim_parse(resp, n, &m) == 0) {
         if (m.type == MBIM_FUNCTION_ERROR) {
             LOGW("MBIM cid %u: function error %u", cid, m.status);
-        } else if (m.type == MBIM_COMMAND_DONE && m.cid == cid && memcmp(m.uuid, MBIM_UUID_BASIC_CONNECT, 16) == 0) {
+        } else if (m.type == MBIM_COMMAND_DONE && m.cid == cid && memcmp(m.uuid, uuid, 16) == 0) {
             *status = m.status;
             ret = (int)m.info_len < cap ? (int)m.info_len : cap;
             memcpy(out, m.info, (size_t)ret);
@@ -847,7 +925,7 @@ static void sleep_s(int s) {
 static int bc(mbim_dev_t *s, uint32_t cid, bool set, const uint8_t *info, int ilen, uint8_t *out, int cap, uint32_t *st,
               int timeout_ms) {
     if (stopping() || s->dead) return -1;
-    return mbim_dev_command(s, cid, set, info, ilen, out, cap, st, timeout_ms);
+    return mbim_dev_command(s, MBIM_UUID_BASIC_CONNECT, cid, set, info, ilen, out, cap, st, timeout_ms);
 }
 
 // SIM 鎖著：有存 PIN 而且這次還沒試過才試一次，被拒就回報，絕不重試（錯三次會鎖成要 PUK）。
@@ -1037,7 +1115,7 @@ void mbim_disconnect(mbim_dev_t *d) {
     uint8_t info[128], out[256];
     uint32_t st;
     int il = mbim_info_connect_set(info, sizeof info, 0, false, "", MBIM_IP_TYPE_IPV4);
-    mbim_dev_command(d, MBIM_CID_CONNECT, true, info, il, out, sizeof out, &st, 5000);
+    mbim_dev_command(d, MBIM_UUID_BASIC_CONNECT, MBIM_CID_CONNECT, true, info, il, out, sizeof out, &st, 5000);
 }
 
 int mbim_data_start(usbdev_t *u, ntb_params_t *np) {

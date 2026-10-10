@@ -14,6 +14,8 @@
 #include "mbim.h"
 #include "netcfg.h"
 #include "session.h"
+#include "sms.h"
+#include "sms_store.h"
 #include "wifi.h"
 
 // 本機管理的 MAC（第一個 byte 0x02）：host 給 feth，閘道是假的，只存在 ARP 回覆裡。
@@ -32,6 +34,21 @@ static const uint8_t GW_MAC[6] = {0x02, 0x44, 0x54, 0x4d, 0x00, 0x02};
 #define LINK_EVERY_S 15  // 訊號、電信商、網路制式多久查一次
 #define SIM_RETRY_S 10   // SIM、APN、註冊的錯誤等多久再重開一次
 
+#define SMS_POLL_S 30            // 數據機沒通知也每 30 秒讀一次簡訊儲存區
+#define SMS_PARTIAL_S 1800       // 多段簡訊缺段等 30 分鐘，還不齊就先存收到的部分
+#define SMS_MAX_RECORDS 64       // IK512 的儲存區是 40 則
+#define SMS_RESP_BUF 16384
+#define SMS_CMD_TIMEOUT_MS 20000
+#define SMS_SEND_TIMEOUT_MS 60000
+
+// 多段簡訊還沒收齊的那幾組（只記在這次連線裡）
+typedef struct {
+    char addr[48];
+    uint16_t ref;
+    uint8_t total;
+    time_t first_seen;
+} sms_partial_t;
+
 typedef struct {
     usbdev_t *u;
     mbim_dev_t m;
@@ -47,12 +64,40 @@ typedef struct {
     uint8_t *txbuf;
     int txcap;
     atomic_ulong rx_pkts, tx_pkts, rx_bytes, tx_bytes, tx_errs, inject_errs;
+    // 簡訊
+    bool sms_ready;          // 儲存區準備好了
+    atomic_bool sms_kick;    // 數據機通知有新簡訊或儲存區滿了：主迴圈馬上去讀
+    pthread_mutex_t flash_lock;
+    uint8_t flash[4096];     // class 0 簡訊：PDU 直接在 indication 裡，不進儲存區
+    uint32_t flash_len;
+    sms_partial_t partial[8];
 } msess_t;
 
 // ---------- 控制 ----------
 
+static void on_sms_indicate(msess_t *s, const mbim_msg_t *m) {
+    if (m->cid == MBIM_CID_SMS_MESSAGE_STORE_STATUS) {
+        uint32_t flag, index;
+        if (mbim_parse_sms_store_status(m->info, m->info_len, &flag, &index) != 0) return;
+        LOGD("SMS store status 0x%x", flag);
+        if (flag & (MBIM_SMS_STORE_NEW_MESSAGE | MBIM_SMS_STORE_FULL)) s->sms_kick = true;
+    } else if (m->cid == MBIM_CID_SMS_READ) {
+        pthread_mutex_lock(&s->flash_lock);
+        if (!s->flash_len && m->info_len <= sizeof s->flash) {
+            memcpy(s->flash, m->info, m->info_len);
+            s->flash_len = m->info_len;
+        }
+        pthread_mutex_unlock(&s->flash_lock);
+        s->sms_kick = true;
+    }
+}
+
 static void on_indicate(void *ctx, const mbim_msg_t *m) {
     msess_t *s = ctx;
+    if (memcmp(m->uuid, MBIM_UUID_SMS, 16) == 0) {
+        on_sms_indicate(s, m);
+        return;
+    }
     if (memcmp(m->uuid, MBIM_UUID_BASIC_CONNECT, 16) != 0) return;
     if (m->cid == MBIM_CID_CONNECT) {
         mbim_connect_info_t c;
@@ -70,6 +115,241 @@ static void update_link(msess_t *s, const char *custom) {
     mbim_link_t l;
     if (mbim_query_link(&s->m, &l) != 0) return;
     status_set_link(l.bars, l.rssi >= 0 ? -113 + 2 * l.rssi : 0, l.provider, mbim_tech_name(l.data_class, custom));
+}
+
+// ---------- 簡訊 ----------
+// 數據機裡的簡訊讀出來、寫進收件匣檔案（fsync 完）之後就從數據機刪掉（Jason 2026/10/10 決定）：
+// IK512 只放得下 40 則，滿了新簡訊就收不進來。多段簡訊等全部到齊、合併存好才刪。
+// 號碼和內容不寫進 log。
+
+static bool sms_delete(msess_t *s, uint32_t index) {
+    uint8_t info[8], out[64];
+    uint32_t st = 0;
+    int il = mbim_info_sms_delete(info, MBIM_SMS_FLAG_INDEX, index);
+    int n = mbim_dev_command(&s->m, MBIM_UUID_SMS, MBIM_CID_SMS_DELETE, true, info, il, out, sizeof out, &st,
+                             SMS_CMD_TIMEOUT_MS);
+    if (n < 0 || st != 0) {
+        LOGW("SMS: could not remove slot %u from the modem (%s)", index, n < 0 ? "no answer" : mbim_status_name(st));
+        return false;
+    }
+    return true;
+}
+
+// 收到或送出一則：這支數據機能用簡訊。送簡訊被拒（MBIM failure，一段都沒送出）：記下來，App 不顯示簡訊入口。
+static void sms_mark_usable(msess_t *s, bool usable) {
+    pthread_mutex_lock(&g_state_lock);
+    bool was = g_st.sms_unsupported;
+    g_st.sms_unsupported = !usable;
+    pthread_mutex_unlock(&g_state_lock);
+    if (was == !usable) return;
+    sms_modem_set_unsupported(s->u->vid, s->u->pid, !usable);
+    if (usable) LOGI("SMS: the modem handles SMS after all; showing Messages again");
+    else LOGW("SMS: the modem refused to send; hiding Messages for %04x:%04x until it sends or receives one", s->u->vid, s->u->pid);
+}
+
+// 這組多段簡訊第一次看到是多久以前（秒）。第一次看到就記下來，回傳 0。
+static time_t partial_age(msess_t *s, const sms_pdu_t *p) {
+    time_t now = mono_now();
+    int oldest = 0;
+    for (int i = 0; i < (int)(sizeof s->partial / sizeof s->partial[0]); i++) {
+        sms_partial_t *e = &s->partial[i];
+        if (e->total == p->total && e->ref == p->ref && strcmp(e->addr, p->addr) == 0) return now - e->first_seen;
+        if (e->first_seen < s->partial[oldest].first_seen) oldest = i;
+    }
+    sms_partial_t *e = &s->partial[oldest];
+    strlcpy(e->addr, p->addr, sizeof e->addr);
+    e->ref = p->ref;
+    e->total = p->total;
+    e->first_seen = now;
+    return 0;
+}
+
+static void partial_forget(msess_t *s, const sms_pdu_t *p) {
+    for (int i = 0; i < (int)(sizeof s->partial / sizeof s->partial[0]); i++) {
+        sms_partial_t *e = &s->partial[i];
+        if (e->total == p->total && e->ref == p->ref && strcmp(e->addr, p->addr) == 0) memset(e, 0, sizeof *e);
+    }
+}
+
+// 處理讀到的簡訊。stored 表示在數據機的儲存區裡（存好要刪）；false 是 indication 直接帶來的 class 0 簡訊。
+static void sms_take(msess_t *s, const mbim_sms_record_t *r, int cnt, bool stored) {
+    sms_pdu_t *p = calloc((size_t)cnt, sizeof *p);
+    uint8_t *mark = calloc((size_t)cnt, 1);  // 0 待處理、1 不是收到的簡訊（不動）、2 處理完（要刪）、3 這次先不處理
+    if (!p || !mark) goto out;
+    for (int i = 0; i < cnt; i++) {
+        if (sms_decode(r[i].pdu, (int)r[i].len, &p[i]) != 0 || p[i].submit) {
+            LOGD("SMS: slot %u is not a received message; leaving it", r[i].index);
+            mark[i] = 1;
+        } else if (p[i].pid == 0x40 || p[i].port) {
+            LOGI("SMS: discarded a %s message", p[i].pid == 0x40 ? "silent (type 0)" : "port-addressed (WAP push, MMS notice)");
+            mark[i] = 2;
+        }
+    }
+    for (int i = 0; i < cnt; i++) {
+        if (mark[i]) continue;
+        if (p[i].total <= 1) {
+            uint64_t uid = sms_hash(SMS_HASH_INIT, r[i].pdu, r[i].len);
+            bool dup = sms_store_has(uid);
+            if (sms_store_add_received(uid, p[i].addr, p[i].time, p[i].text, 1)) {
+                mark[i] = 2;
+                if (!dup) {
+                    LOGI("SMS: received a message");
+                    sms_mark_usable(s, true);
+                }
+            }
+            continue;
+        }
+        if (!stored) {
+            mark[i] = 3;  // 多段的 class 0 很少見；只處理儲存區裡的多段簡訊
+            continue;
+        }
+        // 多段：同一個寄件者、reference、段數的湊成一組，每段取第一個
+        int at[256], present = 0;
+        for (int k = 0; k <= p[i].total; k++) at[k] = -1;
+        for (int j = i; j < cnt; j++) {
+            if (mark[j] || p[j].total != p[i].total || p[j].ref != p[i].ref || strcmp(p[j].addr, p[i].addr) != 0) continue;
+            if (at[p[j].seq] < 0) {
+                at[p[j].seq] = j;
+                present++;
+            }
+        }
+        bool complete = present == p[i].total;
+        if (!complete && partial_age(s, &p[i]) < SMS_PARTIAL_S) {
+            LOGD("SMS: waiting for %d more parts", p[i].total - present);
+            for (int k = 1; k <= p[i].total; k++)
+                if (at[k] >= 0) mark[at[k]] = 3;
+            continue;
+        }
+        char *text = malloc((size_t)present * SMS_TEXT_MAX + (size_t)p[i].total * 4 + 1);
+        if (!text) break;
+        text[0] = '\0';
+        uint64_t uid = SMS_HASH_INIT;
+        time_t t = 0;
+        for (int k = 1; k <= p[i].total; k++) {
+            if (at[k] < 0) {
+                strcat(text, "…");  // 沒收到的那一段
+                continue;
+            }
+            const sms_pdu_t *q = &p[at[k]];
+            strcat(text, q->text);
+            uid = sms_hash(uid, r[at[k]].pdu, r[at[k]].len);
+            if (!t) t = q->time;
+        }
+        bool dup = sms_store_has(uid);
+        if (sms_store_add_received(uid, p[i].addr, t, text, present)) {
+            if (!dup) {
+                LOGI("SMS: received a message (%d parts%s)", p[i].total, complete ? "" : ", some never arrived");
+                sms_mark_usable(s, true);
+            }
+            partial_forget(s, &p[i]);
+            // 同一組的都刪（包括重複收到的段）
+            for (int j = i; j < cnt; j++)
+                if (!mark[j] && p[j].total == p[i].total && p[j].ref == p[i].ref && strcmp(p[j].addr, p[i].addr) == 0)
+                    mark[j] = 2;
+        }
+        free(text);
+    }
+    if (stored) {
+        int removed = 0;
+        for (int i = 0; i < cnt; i++)
+            if (mark[i] == 2 && sms_delete(s, r[i].index)) removed++;
+        if (removed) LOGD("SMS: removed %d slots from the modem", removed);
+    }
+out:
+    free(p);
+    free(mark);
+}
+
+// 儲存區準備好了沒、滿了沒、讀新簡訊、處理 class 0 簡訊。
+static void sms_service(msess_t *s) {
+    uint8_t *out = malloc(SMS_RESP_BUF), info[16];
+    uint32_t st = 0;
+    int n;
+    if (!out) return;
+    if (!s->sms_ready) {
+        mbim_sms_config_t c;
+        n = mbim_dev_command(&s->m, MBIM_UUID_SMS, MBIM_CID_SMS_CONFIGURATION, false, NULL, 0, out, SMS_RESP_BUF, &st,
+                             SMS_CMD_TIMEOUT_MS);
+        if (n >= 0 && st == 0 && mbim_parse_sms_config(out, (uint32_t)n, &c) == 0 && c.storage_state == 1 && c.format == 0) {
+            s->sms_ready = true;
+            bool unsupported = sms_modem_unsupported(s->u->vid, s->u->pid);
+            pthread_mutex_lock(&g_state_lock);
+            g_st.sms_unsupported = unsupported;
+            pthread_mutex_unlock(&g_state_lock);
+            LOGI("SMS: modem storage ready (%u slots)%s", c.max_messages,
+                 unsupported ? "; this modem refused to send before, Messages stays hidden" : "");
+        } else {
+            LOGD("SMS: storage not ready (%s)", n < 0 ? "no answer" : mbim_status_name(st));
+        }
+    }
+    if (s->sms_ready) {
+        uint32_t flag = 0, index = 0;
+        n = mbim_dev_command(&s->m, MBIM_UUID_SMS, MBIM_CID_SMS_MESSAGE_STORE_STATUS, false, NULL, 0, out, SMS_RESP_BUF,
+                             &st, SMS_CMD_TIMEOUT_MS);
+        bool full = n >= 0 && st == 0 && mbim_parse_sms_store_status(out, (uint32_t)n, &flag, &index) == 0 &&
+                    (flag & MBIM_SMS_STORE_FULL);
+        int il = mbim_info_sms_read(info, MBIM_SMS_FLAG_ALL, 0);
+        n = mbim_dev_command(&s->m, MBIM_UUID_SMS, MBIM_CID_SMS_READ, false, info, il, out, SMS_RESP_BUF, &st,
+                             SMS_CMD_TIMEOUT_MS);
+        if (n >= 0 && st == 0) {
+            mbim_sms_record_t rec[SMS_MAX_RECORDS];
+            int cnt = mbim_parse_sms_read(out, (uint32_t)n, rec, SMS_MAX_RECORDS);
+            if (cnt > 0) sms_take(s, rec, cnt, true);
+        } else {
+            LOGD("SMS: reading the modem storage failed (%s)", n < 0 ? "no answer" : mbim_status_name(st));
+        }
+        pthread_mutex_lock(&g_state_lock);
+        if (full && !g_st.sms_full) LOGW("SMS: the modem's message storage is full");
+        g_st.sms_ready = true;
+        g_st.sms_full = full;
+        pthread_mutex_unlock(&g_state_lock);
+    }
+    pthread_mutex_lock(&s->flash_lock);
+    uint32_t fl = s->flash_len;
+    if (fl) memcpy(out, s->flash, fl);
+    s->flash_len = 0;
+    pthread_mutex_unlock(&s->flash_lock);
+    if (fl) {
+        mbim_sms_record_t rec[8];
+        int cnt = mbim_parse_sms_read(out, fl, rec, 8);
+        if (cnt > 0) sms_take(s, rec, cnt, false);
+    }
+    free(out);
+}
+
+// 寄件佇列裡的簡訊一則一則送。送到一半失敗不重試（已經送出去的那幾段收不回來，重送會重複收費）。
+static void sms_send_queued(msess_t *s) {
+    static uint8_t ref;
+    if (!ref) ref = (uint8_t)(arc4random() | 1);
+    uint32_t id;
+    char number[48], *text;
+    while (!stopping() && !s->dead && !s->m.dead && sms_store_next_queued(&id, number, sizeof number, &text)) {
+        uint8_t(*pdu)[SMS_PDU_MAX] = malloc(SMS_MAX_PARTS * sizeof *pdu);
+        int len[SMS_MAX_PARTS];
+        int parts = pdu ? sms_encode_submit(number, text, ref++, -1, pdu, len, SMS_MAX_PARTS) : -1;
+        free(text);
+        const char *err = parts < 0 ? "invalid" : NULL;
+        int sent = 0;
+        uint32_t st = 0;
+        for (int k = 0; k < parts && !err; k++) {
+            uint8_t info[12 + SMS_PDU_MAX + 4], out[64];
+            int il = mbim_info_sms_send(info, sizeof info, pdu[k], len[k]);
+            int n = il > 0 ? mbim_dev_command(&s->m, MBIM_UUID_SMS, MBIM_CID_SMS_SEND, true, info, il, out, sizeof out, &st,
+                                              SMS_SEND_TIMEOUT_MS)
+                           : -1;
+            if (n < 0 || st != 0) err = sent ? "partial" : n < 0 ? "no_answer" : "rejected";
+            else sent++;
+        }
+        free(pdu);
+        sms_store_finish(id, err);
+        if (!err) sms_mark_usable(s, true);
+        else if (!sent && st == 2) sms_mark_usable(s, false);  // MBIM_STATUS_FAILURE
+        if (err)
+            LOGW("SMS: sending failed after %d of %d parts (%s%s%s)", sent, parts, err, st ? ", " : "",
+                 st ? mbim_status_name(st) : "");
+        else
+            LOGI("SMS: sent a message (%d part%s)", parts, parts == 1 ? "" : "s");
+    }
 }
 
 // ---------- 資料 ----------
@@ -183,6 +463,7 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
     s->u = u;
     s->net.bpf = -1;
     pthread_mutex_init(&s->tx_lock, NULL);
+    pthread_mutex_init(&s->flash_lock, NULL);
     pthread_t rx = 0, tx = 0;
     char b1[16], b2[16];
     bool published = false, reset_usb = false, connected = false;
@@ -334,7 +615,7 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
     }
 
     time_t start = mono_now();
-    time_t last_check = start, last_probe = start, last_ping = 0, last_link = start;
+    time_t last_check = start, last_probe = start, last_ping = 0, last_link = start, last_sms = 0;
     int unanswered = 0;
     long rx_at_ping = 0;
     uint16_t ping_seq = 0;
@@ -371,6 +652,12 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
             last_link = now;
             update_link(s, custom);
         }
+        if (s->sms_kick || now - last_sms >= SMS_POLL_S) {
+            s->sms_kick = false;
+            last_sms = now;
+            sms_service(s);
+        }
+        if (s->sms_ready) sms_send_queued(s);
         // 有收到東西就代表通的；閒置超過 IDLE_PROBE_S 才 ping
         if (s->last_rx > rx_at_ping) unanswered = 0;
         if (now - s->last_rx >= IDLE_PROBE_S && now - last_ping >= PROBE_EVERY_S) {
@@ -391,6 +678,11 @@ bool run_mbim_session(usbdev_t *u, const dt_config *opt) {
     }
 
 out:
+    pthread_mutex_lock(&g_state_lock);
+    g_st.sms_ready = false;
+    g_st.sms_full = false;
+    g_st.sms_unsupported = false;
+    pthread_mutex_unlock(&g_state_lock);
     if (err) status_set(ST_CONNECTING, NULL, err);
     if (err) LOGE("modem connection failed: %s", err);
     s->dead = true;
@@ -425,6 +717,7 @@ out:
              (unsigned long)s->tx_bytes, (unsigned long)s->tx_errs, (unsigned long)s->inject_errs);
     free(s->txbuf);
     pthread_mutex_destroy(&s->tx_lock);
+    pthread_mutex_destroy(&s->flash_lock);
     free(s);
     return err != NULL;
 }

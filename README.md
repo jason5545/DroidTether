@@ -36,12 +36,17 @@ Tetherline speaks MBIM itself: it opens the modem's control channel, waits for t
 
 The panel shows the carrier, the network type and the signal as bars. IPv6 works alongside IPv4 when the network offers it (Taiwan Mobile does): the daemon answers neighbor discovery for the modem's side of the link and registers the IPv6 address, router and DNS with `configd`. If the SIM needs its PIN, the panel asks for it once. The daemon keeps it in a file only root can read and enters it on later plug-ins, and it never tries a PIN the SIM has rejected, so a stored PIN cannot use up the attempts and lock the SIM into PUK.
 
+Text messages go through the modem's MBIM SMS service in PDU format: GSM 7-bit and UCS-2 (Chinese and emoji included), with multipart messages joined on arrival and split when sending (up to 10 parts). Each received message is saved to a file only root can read, next to the settings, and only then deleted from the modem, whose storage is small (40 messages on the IK512) and takes no new messages once full. A multipart message is deleted only after all its parts are in and saved. Messages opens from the panel, and each new message brings a notification. Message text and phone numbers never go into the log.
+
+The IK512 itself cannot do SMS. Its firmware advertises SMS, but sending fails at once (MBIM status `failure`), and messages sent to it never arrive. Over Qualcomm's QMI, which the modem exposes through MBIM, the messaging service answers `DeviceUnsupported` and IMS is not running, even though the Taiwan Mobile carrier profile is the one selected; the same SIM handles SMS in a phone. When a modem refuses to send, the daemon remembers it by USB vendor and product ID and the app hides Messages until that modem sends or receives a message. So the SMS encoding has been checked against libmbim and against real messages from ModemManager's tests, not yet on a live network.
+
 Tested with a TCL LINKKEY IK512 (Qualcomm SDX62) on Taiwan Mobile, on macOS 26: plugged in, the Mac is online about 3 seconds later, with the carrier's DNS, and the live DNS test (14/14) and VPN test (26/26) pass over the modem. IPv6 gets a global address from the carrier, and `ping6` and HTTPS over IPv6 work. Every request the daemon builds also matches libmbim byte for byte. This modem ignores the MBIM open request until the host has set its NTB input size, which Linux always does while binding, so the daemon does it too.
 
 ## Features
 
 - Enable USB tethering on the phone and the Mac is online about a second later. Unplug and Wi-Fi comes back.
 - 4G/5G USB modems in MBIM mode: plug in and the Mac dials with the configured APN, over IPv4 and IPv6, with the carrier, network type and signal bars in the panel, and SIM PIN entry when needed.
+- SMS on modems that support it: an inbox grouped by conversation, writing and replying, and a notification for each new message.
 - Menu bar panel: status, IP and DNS, a two-minute traffic graph, and ping to the phone (the USB link) and to 1.1.1.1 (through the phone).
 - Pause, resume and reconnect.
 - Settings: use the phone as the main connection or not, DNS (from the phone or custom), turn Wi-Fi off while connected, open at login.
@@ -71,7 +76,7 @@ default route and DNS → the phone
 Tetherline.app (menu bar) ⇄ /var/run/droidtetherd.sock ⇄ droidtetherd
 ```
 
-- `src/` is the daemon, in C (about 3,500 lines): USB discovery, RNDIS, DHCP, MBIM, `feth`/BPF, SystemConfiguration and the control socket.
+- `src/` is the daemon, in C (about 5,300 lines): USB discovery, RNDIS, DHCP, MBIM, SMS, `feth`/BPF, SystemConfiguration and the control socket.
 - `app/` is the menu bar app, in SwiftUI. It talks to the daemon over a Unix socket, one command per line and one JSON reply.
 - Only the RNDIS or MBIM control and data interfaces are claimed. ADB, and a modem's AT and diagnostic ports, stay free.
 
@@ -120,6 +125,7 @@ On first launch, macOS asks you to allow the background item. Turn on **Tetherli
 | Modem: "No SIM card", "needs its PUK", "could not register" | The modem reports this itself. Check the SIM in a phone first. A SIM that wants its PUK has to be unlocked in a phone. |
 | Modem: "The SIM card rejected the PIN" | The saved PIN was wrong and has been deleted, so it is not tried again. The panel shows how many attempts are left; enter the right PIN there. |
 | Modem: "refused the data connection; check the APN" | The network rejected the APN. Set the one your carrier publishes in Settings; the daemon tries again every 10 seconds, and the log shows the MBIM status. |
+| Modem connected, but no Messages in the panel | The modem refused to send an SMS (the log says so), as the TCL IK512 does. Messages comes back by itself once that modem receives a message. To clear it by hand, delete `/Library/Application Support/DroidTether/config.sms-unsupported` as root. |
 | Ping works, websites hang | Some carriers drop large packets. Try a smaller MTU with the development build below (`--mtu 1380`). |
 | Background service never starts after switching between a self-built copy and a downloaded one | `launchctl print system/io.github.jason5545.droidtether` shows `spawn failed` and `needs LWCR update`. launchd still holds the code requirement of the first copy that registered the service. Restarting the Mac clears it. Avoid keeping several copies of Tetherline.app (or an older DroidTether.app) around: macOS may resolve the bundled daemon from the wrong one. |
 
@@ -139,9 +145,11 @@ python3 tests/dns_logic_test.py --quick   # live DNS/routing invariants with the
 python3 tests/dns_logic_test.py           # plus reconnect, pause, DNS and primary switches, Wi-Fi off while
                                           # connected, configd losing our entries, and a daemon crash
                                           # (the connection drops briefly)
-build/test_mbim                           # part of make test: MBIM messages against bytes a TCL IK512 sent
+build/test_mbim                           # part of make test: MBIM messages against bytes a TCL IK512 sent,
+                                          # SMS PDUs against real messages and expected output from ModemManager's tests
+build/test_sms_store                      # part of make test: the SMS inbox file (save, reload, duplicates)
 build/test_mbim --dump > mbim.dump        # on a Linux host with libmbim: python3 tests/mbim_oracle.py mbim.dump
-                                          # checks every request against libmbim, byte for byte
+                                          # checks every request against libmbim, byte for byte (SMS included)
 python3 tests/vpn_logic_test.py           # a Tailscale exit node layered on the tether keeps the default route
                                           # (switches to an exit node and back; needs Tailscale online)
 swiftc -O -parse-as-library app/Sources/WifiGuard.swift tests/wifi_guard_test.swift -o build/wifi_guard_test
@@ -236,12 +244,17 @@ Tetherline 自己處理 MBIM：開控制通道、等 SIM 和註冊、用 APN 撥
 
 面板會顯示電信商、網路制式和訊號格數。網路有給 IPv6 時（台灣大哥大有），IPv4、IPv6 都能用。SIM 卡要 PIN 時，面板會請你輸入一次；daemon 把它存在只有 root 讀得到的檔案，之後插上自動輸入。被拒絕過的 PIN 會立刻刪掉、絕不再試，所以存著的 PIN 不會把次數用完、把 SIM 鎖成要 PUK。
 
+簡訊走數據機的 MBIM SMS 服務，PDU 格式：GSM 7-bit 和 UCS-2（中文、emoji 都可以），收到的多段簡訊會接成一則，寄出時太長就分段（最多 10 段）。收到的簡訊先存進設定檔旁邊、只有 root 能讀的檔案，存好才從數據機刪掉：數據機的空間很小（IK512 只有 40 則），滿了就收不到新簡訊。多段簡訊要等每一段都到齊、合併存好才刪。面板可以打開簡訊視窗，有新簡訊會跳通知。內容和號碼不會寫進記錄檔。
+
+IK512 本身不能收發簡訊。韌體宣稱支援，但一送就回 MBIM `failure`，傳給它的簡訊也收不到。透過 MBIM 裡的高通 QMI 查，簡訊服務回 `DeviceUnsupported`、IMS 沒在運作，而選用的電信商設定檔確實是台灣大哥大；同一張 SIM 在手機上收發簡訊都正常。數據機送簡訊被拒時，daemon 會按 USB 的 VID:PID 記住它，App 就不顯示簡訊入口，等這支數據機收到或送出任何一則才再出現。所以簡訊的編解碼只跟 libmbim、ModemManager 測試裡的真實簡訊對照過，還沒在實際網路上收發過。
+
 實測：TCL LINKKEY IK512（高通 SDX62）、台灣大哥大、macOS 26。插上後大約 3 秒連上，DNS 用電信商的，透過數據機跑即時 DNS 測試 14/14、VPN 測試 26/26。IPv6 拿得到電信商配的全域位址，`ping6` 和走 IPv6 的 HTTPS 都正常。daemon 組出來的每種請求也都跟 libmbim 逐位元組相同。這張網卡要主機先設定 NTB 接收大小才肯回 MBIM 的 OPEN；Linux 綁定驅動時一定會送，所以 daemon 也照做。
 
 ### 功能
 
 - 手機打開 USB 網路共用，大約一秒就連上；拔線自動回到 Wi-Fi。
 - MBIM 模式的 4G/5G USB 數據機：插上就用設定的 APN 撥號，IPv4、IPv6 都有，面板顯示電信商、網路制式和訊號格數，SIM 卡要 PIN 時可以直接輸入。APN 和 IPv6 開關在「設定 → 4G/5G 數據機」。
+- 支援簡訊的數據機可以收發簡訊：依對話分組的收件匣、寫簡訊和回覆，新簡訊跳通知。
 - 選單列面板：連線狀態、IP 與 DNS、最近 2 分鐘的流量圖，以及兩種 Ping：「手機」是 USB 線路本身的延遲，「網路」是經過手機連到 1.1.1.1 的延遲。
 - 暫停、恢復、重新連線。
 - 設定：是否設為主要連線、DNS 來源、連線時關閉 Wi-Fi、登入時開啟。
