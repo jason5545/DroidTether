@@ -1,5 +1,6 @@
-// droidtetherd：Android USB 網路分享（RNDIS）的使用者空間驅動。
-// 流程：找裝置 → RNDIS 初始化 → DHCP → 建 feth 網卡 → 向 configd 註冊網路服務 → 轉送乙太網路 frame。
+// droidtetherd：Android USB 網路分享（RNDIS）與 4G/5G USB 數據機（MBIM）的使用者空間驅動。
+// RNDIS 流程：找裝置 → RNDIS 初始化 → DHCP → 建 feth 網卡 → 向 configd 註冊網路服務 → 轉送乙太網路 frame。
+// MBIM 的流程在 mbim_session.c。
 // 拔線或出錯就整段拆掉，回到找裝置。
 
 #include <arpa/inet.h>
@@ -27,6 +28,7 @@
 #include "feth.h"
 #include "netcfg.h"
 #include "rndis.h"
+#include "session.h"
 #include "state.h"
 #include "usb.h"
 #include "wifi.h"
@@ -38,7 +40,6 @@ atomic_bool g_stop;
 atomic_bool g_reset;
 
 #define RX_BUF_SIZE 65536
-#define MAX_MTU 1500
 #define MAX_FRAME (14 + 4 + MAX_MTU)  // 含 VLAN tag
 
 // ---------- 除錯用：把進出 USB 的 frame 錄成 pcap ----------
@@ -57,7 +58,7 @@ static int pcap_open(const char *path) {
     return 0;
 }
 
-static void pcap_frame(const uint8_t *f, int len) {
+void pcap_frame(const uint8_t *f, int len) {
     if (!g_pcap) return;
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -138,7 +139,7 @@ const char *ip_str(uint32_t ip_be, char buf[16]) {
     return buf;
 }
 
-static time_t mono_now(void) {
+time_t mono_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec;
@@ -364,7 +365,7 @@ static void default_route_iface(char *out, size_t n) {
 // configd 收到 OverridePrimary 後會自己改預設路由，這裡只等它、記一筆。
 // 等不到不自己補 0/1、128/1：那是 VPN（例如 Tailscale exit node）排在前面，
 // 補上去會蓋過 VPN 的預設路由，流量變成從手機明文出去（10/10 實測重現）。
-static void wait_default_route(const char *ifname) {
+void wait_default_route(const char *ifname) {
     char cur[IFNAMSIZ];
     for (int i = 0; i < 30; i++) {
         default_route_iface(cur, sizeof cur);
@@ -380,10 +381,9 @@ static void wait_default_route(const char *ifname) {
 // ---------- DNS ----------
 
 #define DNS_PROBE_MS 1500
-#define DNS_REPROBE_S 60
 
 // 手機給的 DNS 逐一直接問，回傳有回應的幾台（放進 out）。
-static int probe_phone_dns(const char *ifname, const uint32_t *phone, int n, uint32_t *out) {
+int probe_phone_dns(const char *ifname, const uint32_t *phone, int n, uint32_t *out) {
     if (g_dns_probe_fail) return 0;
     int k = 0;
     for (int i = 0; i < n; i++)
@@ -392,13 +392,13 @@ static int probe_phone_dns(const char *ifname, const uint32_t *phone, int n, uin
 }
 
 // 手機不轉發 DNS 時改用的，跟 MacTethering 的預設一樣。
-static int fallback_dns(uint32_t *out) {
+int fallback_dns(uint32_t *out) {
     out[0] = htonl(0x08080808u);
     out[1] = htonl(0x08080404u);
     return 2;
 }
 
-static void dns_list(char *buf, size_t cap, const uint32_t *dns, int n) {
+void dns_list(char *buf, size_t cap, const uint32_t *dns, int n) {
     buf[0] = '\0';
     for (int i = 0; i < n; i++) {
         char t[16];
@@ -409,7 +409,7 @@ static void dns_list(char *buf, size_t cap, const uint32_t *dns, int n) {
 
 // ---------- 一次連線 ----------
 
-static bool wifi_wanted(void) {
+bool wifi_wanted(void) {
     pthread_mutex_lock(&g_state_lock);
     bool w = g_cfg.wifi_off && g_cfg.primary;
     pthread_mutex_unlock(&g_state_lock);
@@ -797,7 +797,8 @@ int main(int argc, char **argv) {
         char hint[128];
         usb_find_result r = usb_find_open(ctx, &u, hint, sizeof hint);
         if (r == USB_FOUND) {
-            if (run_session(&u, &cfg)) wifi_tether_gone("connection failed");
+            bool failed = u.kind == DEV_MBIM ? run_mbim_session(&u, &cfg) : run_session(&u, &cfg);
+            if (failed) wifi_tether_gone("connection failed");
             usb_close(&u);
             last = USB_FOUND;
             sleep_ms_interruptible(1000);

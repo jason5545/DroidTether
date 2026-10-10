@@ -258,6 +258,13 @@ struct PanelView: View {
         case "rndis_failed": return NSLocalizedString("Could not talk to the phone over USB", comment: "")
         case "interface_failed": return NSLocalizedString("Could not create the network interface", comment: "")
         case "netcfg_failed": return NSLocalizedString("Could not apply network settings", comment: "")
+        case "mbim_failed": return NSLocalizedString("Could not talk to the modem over USB", comment: "")
+        case "sim_missing": return NSLocalizedString("No SIM card in the modem", comment: "")
+        case "sim_locked": return NSLocalizedString("The SIM card is locked with a PIN; unlock it in another device first", comment: "")
+        case "sim_failed": return NSLocalizedString("The modem cannot use the SIM card", comment: "")
+        case "radio_off": return NSLocalizedString("The modem's radio is switched off", comment: "")
+        case "not_registered": return NSLocalizedString("The modem could not register with the mobile network", comment: "")
+        case "connect_failed": return NSLocalizedString("The mobile network refused the data connection; check the APN", comment: "")
         default: return code
         }
     }

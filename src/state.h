@@ -26,6 +26,7 @@ typedef struct {
     uint32_t dns[4];
     int ndns;
     int mtu;  // 只能從命令列指定，0 表示自動
+    char apn[64];  // MBIM 數據機撥號用
 } dt_config;
 
 typedef struct {
@@ -49,6 +50,8 @@ extern atomic_bool g_dns_probe_fail;  // 測試用：當作手機不回 DNS
 void config_load(const char *path);
 int config_save(const char *path);
 int config_parse_dns(const char *arg, dt_config *c);
+// APN 只收可列印的 ASCII、不含空白，長度 1～63。
+bool config_valid_apn(const char *apn);
 
 // 換狀態；device 或 error 傳 NULL 表示不變。
 void status_set(dt_state st, const char *device, const char *error);

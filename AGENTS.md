@@ -19,7 +19,9 @@ SMAppService 登記背景服務時，會把當時的簽章身分記成啟動限�
 
 ## 測試
 
-- `make test`：封包單元測試，不需要手機。
+- `make test`：封包單元測試，不需要手機。包含 `build/test_mbim`：MBIM 訊息用 TCL IK512 實際收發的位元組對照。
+- `tests/mbim_probe.c`：在 Linux 主機上用真的 MBIM 數據機跑 `src/mbim.c`（開 session、撥號、自己組 ping 與 DNS 經數據機收發），不建介面、不改路由。PVE 沒有編譯器，在 LXC 112（gki-build）裡用 Mac 帶過去的 `libusb.h` 編，直接連結 `/usr/lib/x86_64-linux-gnu/libusb-1.0.so.0`。跑之前停掉 `failover-watchdog.timer` 與 `ModemManager`，跑完 `systemctl start ModemManager`、`systemctl restart ik512-always-on`、`systemctl start failover-watchdog.timer`；包成 `systemd-run` 執行，SSH 斷了也會還原。2026/10/10 實測全過，5G 備援停了約 80 秒，主線路沒受影響。
+- `build/test_mbim --dump` 加 `tests/mbim_oracle.py`：在裝了 libmbim 的 Linux 主機（PVE）上，跟 libmbim 逐位元組對照撥號、附著等送不出去的指令。不需要數據機。
 - `python3 tests/dns_logic_test.py`：DNS 與路由的實機邏輯測試，需要手機連線。
 - `python3 tests/vpn_logic_test.py`：Tailscale exit node 疊在 tether 上時，VPN 必須拿到預設路由。
 - `swiftc -O -parse-as-library app/Sources/WifiGuard.swift tests/wifi_guard_test.swift -o build/wifi_guard_test && build/wifi_guard_test`：daemon 連不上時，App 把 daemon 關掉的 Wi-Fi 開回來的條件。

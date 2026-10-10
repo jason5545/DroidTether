@@ -4,6 +4,7 @@
 //   set primary 0|1            要不要當主要連線
 //   set dns phone|IP[,IP...]   DNS 來源
 //   set wifi_off 0|1           連線時關掉 Wi-Fi（不用重連）
+//   set apn NAME               MBIM 數據機撥號用的 APN
 //   reconnect                  斷開重連
 //   quit                       結束行程（launchd 會重新啟動，用在 App 更新後換新版 daemon）
 
@@ -82,6 +83,8 @@ static void status_json(sbuf *b) {
            g_cfg.enabled ? "true" : "false", g_cfg.primary ? "true" : "false", g_cfg.wifi_off ? "true" : "false",
            g_cfg.dns_from_phone ? "phone" : "custom");
     sb_ips(b, g_cfg.dns, g_cfg.dns_from_phone ? 0 : g_cfg.ndns);
+    sb_add(b, ",\"apn\":");
+    sb_str(b, g_cfg.apn);
     sb_add(b, "}}");
     pthread_mutex_unlock(&g_state_lock);
 }
@@ -158,6 +161,7 @@ static void handle(char *line, sbuf *out) {
         else if (strcmp(key, "primary") == 0) g_cfg.primary = strcmp(val, "0") != 0;
         else if (strcmp(key, "wifi_off") == 0) g_cfg.wifi_off = strcmp(val, "0") != 0;
         else if (strcmp(key, "dns") == 0) ok = config_parse_dns(val, &g_cfg) == 0;
+        else if (strcmp(key, "apn") == 0) ok = config_valid_apn(val) && strlcpy(g_cfg.apn, val, sizeof g_cfg.apn);
         else ok = false;
         pthread_mutex_unlock(&g_state_lock);
         if (ok) {

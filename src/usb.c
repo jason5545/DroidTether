@@ -39,61 +39,6 @@ static bool looks_like_android(const struct libusb_config_descriptor *cfg, uint1
     return false;
 }
 
-// RNDIS 控制介面的三種常見 class/subclass/protocol 組合：
-// Android 用 0xEF/0x04/0x01（Misc / RNDIS over Ethernet），
-// 部分裝置用 0xE0/0x01/0x03（Wireless / RNDIS），少數用 0x02/0x02/0xFF（CDC ACM vendor）。
-static bool is_rndis_comm(const struct libusb_interface_descriptor *d) {
-    return (d->bInterfaceClass == 0xEF && d->bInterfaceSubClass == 0x04 && d->bInterfaceProtocol == 0x01) ||
-           (d->bInterfaceClass == 0xE0 && d->bInterfaceSubClass == 0x01 && d->bInterfaceProtocol == 0x03) ||
-           (d->bInterfaceClass == 0x02 && d->bInterfaceSubClass == 0x02 && d->bInterfaceProtocol == 0xFF);
-}
-
-// 在設定描述元裡找 RNDIS 控制介面和緊接著的 CDC Data 介面。
-static bool match_config(const struct libusb_config_descriptor *cfg, usbdev_t *u) {
-    for (int i = 0; i < cfg->bNumInterfaces; i++) {
-        const struct libusb_interface *itf = &cfg->interface[i];
-        if (itf->num_altsetting < 1) continue;
-        const struct libusb_interface_descriptor *c = &itf->altsetting[0];
-        if (!is_rndis_comm(c)) continue;
-
-        u->comm_if = c->bInterfaceNumber;
-        u->ep_int = 0;
-        for (int e = 0; e < c->bNumEndpoints; e++) {
-            const struct libusb_endpoint_descriptor *ep = &c->endpoint[e];
-            if ((ep->bmAttributes & 0x03) == LIBUSB_TRANSFER_TYPE_INTERRUPT && (ep->bEndpointAddress & 0x80))
-                u->ep_int = ep->bEndpointAddress;
-        }
-
-        for (int j = 0; j < cfg->bNumInterfaces; j++) {
-            const struct libusb_interface *ditf = &cfg->interface[j];
-            for (int a = 0; a < ditf->num_altsetting; a++) {
-                const struct libusb_interface_descriptor *d = &ditf->altsetting[a];
-                if (d->bInterfaceClass != 0x0A || d->bInterfaceNumber == c->bInterfaceNumber) continue;
-                uint8_t in = 0, out = 0;
-                int out_max = 0;
-                for (int e = 0; e < d->bNumEndpoints; e++) {
-                    const struct libusb_endpoint_descriptor *ep = &d->endpoint[e];
-                    if ((ep->bmAttributes & 0x03) != LIBUSB_TRANSFER_TYPE_BULK) continue;
-                    if (ep->bEndpointAddress & 0x80) {
-                        in = ep->bEndpointAddress;
-                    } else {
-                        out = ep->bEndpointAddress;
-                        out_max = ep->wMaxPacketSize;
-                    }
-                }
-                if (in && out) {
-                    u->data_if = d->bInterfaceNumber;
-                    u->ep_in = in;
-                    u->ep_out = out;
-                    u->out_maxpkt = out_max > 0 ? out_max : 512;
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
 usb_find_result usb_find_open(libusb_context *ctx, usbdev_t *u, char *hint, size_t hint_cap) {
     if (hint_cap) hint[0] = '\0';
     libusb_device **list = NULL;
@@ -114,7 +59,7 @@ usb_find_result usb_find_open(libusb_context *ctx, usbdev_t *u, char *hint, size
 
         usbdev_t cand;
         memset(&cand, 0, sizeof cand);
-        bool ok = match_config(cfg, &cand);
+        bool ok = usb_match_config(cfg, &cand);
         bool phone = !ok && looks_like_android(cfg, dd.idVendor);
         libusb_free_config_descriptor(cfg);
         if (phone && result == USB_NOT_FOUND) {

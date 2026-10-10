@@ -41,6 +41,8 @@ bool dnsprobe_reply_ok(const uint8_t *buf, int len, uint16_t id) {
     return rcode == 0 || rcode == 3;
 }
 
+#ifdef __APPLE__
+
 static long ms_since(const struct timespec *t0) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -80,3 +82,5 @@ out:
     close(fd);
     return ok;
 }
+
+#endif  // __APPLE__：Linux 上的 tests/mbim_probe.c 只用上面的組裝與判斷

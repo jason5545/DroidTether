@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 
 pthread_mutex_t g_state_lock = PTHREAD_MUTEX_INITIALIZER;
-dt_config g_cfg = {.enabled = true, .primary = true, .dns_from_phone = true};
+dt_config g_cfg = {.enabled = true, .primary = true, .dns_from_phone = true, .apn = "internet"};
 dt_status g_st = {.state = ST_STARTING};
 atomic_ulong g_rx_bytes, g_tx_bytes;
 atomic_bool g_dns_probe_fail;
@@ -62,6 +62,14 @@ int config_parse_dns(const char *arg, dt_config *c) {
     return 0;
 }
 
+bool config_valid_apn(const char *apn) {
+    size_t n = strlen(apn);
+    if (n == 0 || n >= sizeof g_cfg.apn) return false;
+    for (size_t i = 0; i < n; i++)
+        if (apn[i] <= 0x20 || apn[i] > 0x7e) return false;
+    return true;
+}
+
 // 設定檔是很單純的 key=value，一行一個。
 void config_load(const char *path) {
     FILE *f = fopen(path, "r");
@@ -78,6 +86,10 @@ void config_load(const char *path) {
         else if (strcmp(k, "primary") == 0) g_cfg.primary = strcmp(v, "0") != 0;
         else if (strcmp(k, "wifi_off") == 0) g_cfg.wifi_off = strcmp(v, "0") != 0;
         else if (strcmp(k, "dns") == 0 && config_parse_dns(v, &g_cfg) != 0) LOGW("config: bad dns '%s'", v);
+        else if (strcmp(k, "apn") == 0) {
+            if (config_valid_apn(v)) strlcpy(g_cfg.apn, v, sizeof g_cfg.apn);
+            else LOGW("config: bad apn '%s'", v);
+        }
     }
     pthread_mutex_unlock(&g_state_lock);
     fclose(f);
@@ -108,7 +120,7 @@ int config_save(const char *path) {
             fprintf(f, "%s%s", i ? "," : "", ip_str(g_cfg.dns[i], b));
         }
     }
-    fputc('\n', f);
+    fprintf(f, "\napn=%s\n", g_cfg.apn);
     pthread_mutex_unlock(&g_state_lock);
     fclose(f);
     return rename(tmp, path);

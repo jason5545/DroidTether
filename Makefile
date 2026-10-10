@@ -36,7 +36,11 @@ build:
 build/test_packets: tests/test_packets.c src/dhcp.c src/rndis.c src/dnsprobe.c src/*.h | build
 	$(CC) $(CFLAGS) tests/test_packets.c src/dhcp.c src/rndis.c src/dnsprobe.c $(LDLIBS) -o $@
 
-test: build/test_packets
+build/test_mbim: tests/test_mbim.c src/mbim.c src/dhcp.c src/*.h | build
+	$(CC) $(CFLAGS) tests/test_mbim.c src/mbim.c src/dhcp.c $(LDLIBS) -o $@
+
+test: build/test_packets build/test_mbim
+	build/test_mbim
 	build/test_packets build/test_packets.pcap
 	@if command -v tcpdump >/dev/null; then tcpdump -nn -vvv -r build/test_packets.pcap 2>/dev/null | grep -c "udp sum ok" | xargs -I{} sh -c 'test {} -eq 3 && echo "tcpdump: 3/3 udp checksums ok" || { echo "tcpdump: checksum mismatch"; exit 1; }'; fi
 
